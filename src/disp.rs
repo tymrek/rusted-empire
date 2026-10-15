@@ -61,7 +61,7 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         let sidebar_area = upper_chunks[1];
 
         // Center camera on edit cursor, or active unit if blinking, otherwise player capital
-        let center_loc = if game.mode == GameMode::Edit || matches!(game.mode, GameMode::PickDest(_)) {
+        let mut center_loc = if game.mode == GameMode::Edit || matches!(game.mode, GameMode::PickDest(_)) {
             game.edit_cursor
         } else if let Some((loc, _)) = active_blink {
             loc
@@ -71,6 +71,10 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                 .map(|c| c.loc)
                 .unwrap_or(Loc { r: game.rows / 2, c: game.cols / 2 })
         };
+        
+        center_loc.r = (center_loc.r as i32 + game.map_offset_r).clamp(0, game.rows.saturating_sub(1) as i32) as usize;
+        center_loc.c = (center_loc.c as i32 + game.map_offset_c).clamp(0, game.cols.saturating_sub(1) as i32) as usize;
+
         let view_height = map_area.height.saturating_sub(2) as usize;
         let view_width = map_area.width.saturating_sub(2) as usize;
 
@@ -105,7 +109,8 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                     continue;
                 }
 
-                let is_blink_off = active_blink.map_or(false, |(b_loc, show)| b_loc == loc && !show);
+                let is_blink_target = active_blink.map_or(false, |(b_loc, _)| b_loc == loc);
+                let is_blink_off = is_blink_target && !active_blink.unwrap().1;
 
                 // Check pieces
                 let piece_opt = game.pieces.iter().enumerate().find(|(i, p)| p.loc == loc && game.is_visible_to(*i, Owner::Player)).map(|(_, p)| p);
@@ -124,7 +129,9 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                         };
 
                         let color = if p.owner == Owner::Player { Color::Cyan } else { Color::LightRed };
-                        spans.push(Span::styled(ch.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                        let mut style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+                        if is_blink_target { style = style.bg(Color::White).fg(Color::Black); }
+                        spans.push(Span::styled(ch.to_string(), style));
                         continue;
                     }
                 }
@@ -144,23 +151,28 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                             Owner::Comp => Color::Red,
                             Owner::Neutral => Color::Yellow,
                         };
-                        spans.push(Span::styled(ch.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                        let mut style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+                        if is_blink_target { style = style.bg(Color::White).fg(Color::Black); }
+                        spans.push(Span::styled(ch.to_string(), style));
                         continue;
                     }
                 }
 
                 // Terrain
                 let terrain_ch = game.map[r][c] as char;
+                let mut style = if terrain_ch == '#' { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Blue) };
+                if is_blink_target { style = style.bg(Color::White).fg(Color::Black); }
+                
                 if terrain_ch == '#' {
-                    spans.push(Span::styled("#", Style::default().fg(Color::Yellow)));
+                    spans.push(Span::styled("#", style));
                 } else {
-                    spans.push(Span::styled(".", Style::default().fg(Color::Blue)));
+                    spans.push(Span::styled(".", style));
                 }
             }
             lines.push(Line::from(spans));
         }
 
-        let map_title = format!(" VMS Empire | Turn: {} | Mode: {:?} ", game.turn, game.mode);
+        let map_title = format!(" rs Empire | Turn: {} | Mode: {:?} ", game.turn, game.mode);
         let map_widget = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(map_title));
         f.render_widget(map_widget, map_area);
@@ -192,30 +204,56 @@ let mut sidebar_lines = vec![
                     sidebar_lines.push(Line::from(format!(" City: {}", owner_str)));
                     if city.owner == Owner::Player {
                         sidebar_lines.push(Line::from(format!(" Prod: {:?} ({}/{})", city.prod, city.work, city.prod.build_cost())));
+                        if let Some((_, act)) = city.default_orders.iter().find(|(p, _)| *p == city.prod) {
+                            sidebar_lines.push(Line::from(format!(" City Ord: {:?}", act)));
+                        }
                     }
                 }
                 
-                if let Some(piece) = game.pieces.iter().enumerate().find(|(i, p)| p.loc == loc && p.hits > 0 && game.is_visible_to(*i, Owner::Player)).map(|(_, p)| p) {
-                    let owner_str = match piece.owner { Owner::Player => "Player", Owner::Comp => "Enemy", Owner::Neutral => "Neutral" };
-                    sidebar_lines.push(Line::from(format!(" Unit: {} {:?}", owner_str, piece.ptype)));
-                    if piece.owner == Owner::Player {
-                        sidebar_lines.push(Line::from(format!(" Hits: {}/{}", piece.hits, piece.ptype.max_hits())));
-                        if piece.ptype == PieceType::Fighter {
-                            sidebar_lines.push(Line::from(format!(" Fuel: {}/32", piece.fuel)));
-                        } else if piece.ptype == PieceType::Satellite {
-                            sidebar_lines.push(Line::from(format!(" Orbit: {}/20", piece.fuel)));
+                let visible_pieces: Vec<_> = game.pieces.iter().enumerate()
+                    .filter(|(i, p)| p.loc == loc && p.hits > 0 && game.is_visible_to(*i, Owner::Player))
+                    .map(|(_, p)| p)
+                    .collect();
+
+                if !visible_pieces.is_empty() {
+                    sidebar_lines.push(Line::from(format!(" Units Here: {}", visible_pieces.len())));
+                    for p in visible_pieces.iter().take(4) {
+                        let owner_str = match p.owner { Owner::Player => "My", Owner::Comp => "Enemy", Owner::Neutral => "Neut" };
+                        let mut extra = String::new();
+                        if p.owner == Owner::Player {
+                            extra = format!(" ({}/{}) {:?}", p.hits, p.ptype.max_hits(), p.activity);
+                            if p.ptype == PieceType::Transport || p.ptype == PieceType::Carrier {
+                                extra.push_str(&format!(" [Cargo: {}]", p.cargo.len()));
+                            }
                         }
-                        sidebar_lines.push(Line::from(format!(" Moves: {}/{}", piece.moves_left, piece.ptype.max_moves())));
-                        sidebar_lines.push(Line::from(format!(" Order: {:?}", piece.activity)));
-                        if !piece.cargo.is_empty() {
-                            sidebar_lines.push(Line::from(format!(" Cargo: {} units", piece.cargo.len())));
-                        }
+                        sidebar_lines.push(Line::from(format!(" - {} {:?}{}", owner_str, p.ptype, extra)));
+                    }
+                    if visible_pieces.len() > 4 {
+                        sidebar_lines.push(Line::from("   ...and more"));
                     }
                 }
             } else {
                 sidebar_lines.push(Line::from(" Terrain: Fog of War"));
             }
             sidebar_lines.push(Line::from(""));
+        } else if let Some((loc, _)) = active_blink {
+            if let Some(piece) = game.pieces.iter().find(|p| p.loc == loc && p.owner == Owner::Player && p.hits > 0) {
+                sidebar_lines.push(Line::from(Span::styled("--- ACTIVE UNIT ---", Style::default().fg(Color::Cyan))));
+                sidebar_lines.push(Line::from(format!(" Unit: Player {:?}", piece.ptype)));
+                sidebar_lines.push(Line::from(format!(" Hits: {}/{}", piece.hits, piece.ptype.max_hits())));
+                sidebar_lines.push(Line::from(format!(" Moves: {}/{}", piece.moves_left, piece.ptype.max_moves())));
+                if piece.ptype == PieceType::Fighter {
+                    sidebar_lines.push(Line::from(format!(" Fuel: {}/32", piece.fuel)));
+                } else if piece.ptype == PieceType::Satellite {
+                    sidebar_lines.push(Line::from(format!(" Orbit: {}/20", piece.fuel)));
+                }
+                if piece.ptype == PieceType::Transport || piece.ptype == PieceType::Carrier {
+                    sidebar_lines.push(Line::from(format!(" Cargo: {} units", piece.cargo.len())));
+                } else if !piece.cargo.is_empty() {
+                    sidebar_lines.push(Line::from(format!(" Cargo: {} units", piece.cargo.len())));
+                }
+                sidebar_lines.push(Line::from(""));
+            }
         }
 
         sidebar_lines.extend(vec![
