@@ -11,6 +11,23 @@ use crossterm::{
 use std::io::{self, Write};
 use std::time::{Instant, Duration};
 
+#[macro_export]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("empire_debug.log") 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, $($arg)*);
+            }
+        }
+    };
+}
+
 fn prompt_city_production(game: &mut Game, city_idx: usize) {
     let city_loc = game.cities[city_idx].loc;
     let prompt_msg = format!(
@@ -63,6 +80,10 @@ fn prompt_city_production(game: &mut Game, city_idx: usize) {
 }
 
 fn main() -> io::Result<()> {
+    // Clear previous runtime instrumentation log (Debug builds only)
+    #[cfg(debug_assertions)]
+    let _ = std::fs::File::create("empire_debug.log");
+
     // Setup global panic hook to restore terminal on crash
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -143,10 +164,26 @@ fn main() -> io::Result<()> {
     }
 
     // 4. Main Game Loop with Blinking Active Unit Prompting
-    let action_prompt = "[N]ext, [A]utomove, [M]anual, [Q]uit: ";
+    let action_prompt = "[N]ext, [A]utomove, [M]anual, [S]ave, [L]oad, [Q]uit: ";
     disp::refresh_display_with_input(&game, action_prompt);
 
     loop {
+        if let Some(game_over_msg) = game.check_game_over() {
+            game.log(game_over_msg.clone());
+            disp::refresh_display_with_input(&game, " GAME OVER! Press any key to exit... ");
+            
+            loop {
+                if let Ok(Event::Key(_)) = event::read() {
+                    let mut stdout = io::stdout();
+                    let _ = stdout.execute(DisableMouseCapture);
+                    let _ = stdout.execute(cursor::Show);
+                    let _ = terminal::disable_raw_mode();
+                    let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                    return Ok(());
+                }
+            }
+        }
+
         // Event Queue Hook: If the server captured a city in the background, prompt the client immediately
         if let Some(c_idx) = game.pending_cities.pop() {
             prompt_city_production(&mut game, c_idx);
@@ -681,6 +718,33 @@ fn main() -> io::Result<()> {
                                             break;
                                         }
 
+                                        if ptype == PieceType::Fighter {
+                                            if let Some(dist) = game.dist_to_nearest_base(target_loc) {
+                                                let remaining_fuel = game.pieces[piece_idx].fuel - 1;
+                                                if remaining_fuel < dist {
+                                                    let prompt = format!("WARNING: Move leaves {} fuel, but base is {} away. Crash imminent! Proceed? [Y/N]: ", remaining_fuel, dist);
+                                                    disp::refresh_display_with_input(&game, &prompt);
+                                                    let mut confirm = false;
+                                                    loop {
+                                                        if let Ok(Event::Key(k)) = event::read() {
+                                                            if let KeyCode::Char(c) = k.code {
+                                                                match c.to_ascii_lowercase() {
+                                                                    'y' => { confirm = true; break; }
+                                                                    'n' => { break; }
+                                                                    _ => {}
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if !confirm {
+                                                        game.log(String::from("Fighter move cancelled due to fuel warning."));
+                                                        while event::poll(Duration::from_millis(0)).unwrap_or(false) { let _ = event::read(); }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         let (result, msg) = game.attempt_move(piece_idx, target_loc);
                                         
                                         if !msg.is_empty() {
@@ -764,6 +828,18 @@ fn main() -> io::Result<()> {
                             // Drain terminal buffer to prevent instant double-trigger exit
                             while event::poll(Duration::from_millis(0)).unwrap_or(false) {
                                 let _ = event::read();
+                            }
+                        }
+                        's' => {
+                            game.save_game("empire.sav");
+                            game.log(String::from("Game saved to empire.sav."));
+                        }
+                        'l' => {
+                            if let Some(loaded_game) = Game::load_game("empire.sav") {
+                                game = loaded_game;
+                                game.log(String::from("Game loaded from empire.sav."));
+                            } else {
+                                game.log(String::from("Failed to load empire.sav."));
                             }
                         }
                         _ => {

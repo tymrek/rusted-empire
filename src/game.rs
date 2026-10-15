@@ -68,6 +68,14 @@ impl PieceType {
         }
     }
 
+    pub fn strike_damage(&self) -> i32 {
+        match self {
+            PieceType::Submarine => 3,
+            PieceType::Battleship => 2,
+            _ => 1,
+        }
+    }
+
     pub fn build_cost(&self) -> i32 {
         match self {
             PieceType::Army => 5,
@@ -140,6 +148,7 @@ pub struct Piece {
     pub moves_left: i32,
     pub activity: UnitActivity,
     pub cargo: Vec<Piece>,
+    pub fuel: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -258,6 +267,59 @@ impl Game {
         }
     }
 
+    pub fn dist_to_nearest_base(&self, loc: Loc) -> Option<i32> {
+        let mut min_dist: Option<i32> = None;
+        for city in &self.cities {
+            if city.owner == Owner::Player {
+                let dist = (loc.r as i32 - city.loc.r as i32).abs().max((loc.c as i32 - city.loc.c as i32).abs());
+                min_dist = Some(min_dist.unwrap_or(dist).min(dist));
+            }
+        }
+        for piece in &self.pieces {
+            if piece.owner == Owner::Player && piece.ptype == PieceType::Carrier && piece.hits > 0 {
+                let dist = (loc.r as i32 - piece.loc.r as i32).abs().max((loc.c as i32 - piece.loc.c as i32).abs());
+                min_dist = Some(min_dist.unwrap_or(dist).min(dist));
+            }
+        }
+        min_dist
+    }
+
+    pub fn is_visible_to(&self, target_idx: usize, viewer: Owner) -> bool {
+        let target = &self.pieces[target_idx];
+        if target.owner == viewer { return true; }
+        
+        if target.ptype != PieceType::Submarine {
+            if viewer == Owner::Player {
+                return self.player_map[target.loc.r][target.loc.c] != 0;
+            }
+            return true;
+        }
+
+        // Submarine stealth logic
+        for p in &self.pieces {
+            if p.owner == viewer && p.hits > 0 {
+                let dr = (p.loc.r as isize - target.loc.r as isize).abs();
+                let dc = (p.loc.c as isize - target.loc.c as isize).abs();
+                let dist = std::cmp::max(dr, dc);
+
+                if p.ptype == PieceType::Destroyer {
+                    if dist <= p.ptype.sight_range() as isize { return true; }
+                } else {
+                    if dist <= 1 { return true; }
+                }
+            }
+        }
+        for c in &self.cities {
+            if c.owner == viewer {
+                let dr = (c.loc.r as isize - target.loc.r as isize).abs();
+                let dc = (c.loc.c as isize - target.loc.c as isize).abs();
+                let dist = std::cmp::max(dr, dc);
+                if dist <= 1 { return true; }
+            }
+        }
+        false
+    }
+
     pub fn is_coastal(&self, loc: Loc) -> bool {
         for dr in -1..=1 {
             for dc in -1..=1 {
@@ -308,11 +370,12 @@ impl Game {
                 break;
             }
 
-            // Ensure cities are at least a few tiles apart (distance squared < 9 means a radius of ~3 tiles)
+            // Ensure cities are at least 6 tiles apart using Chebyshev distance
             let mut too_close = false;
             for &c_loc in &chosen_city_locs {
-                let dist_sq = (c_loc.r as isize - loc.r as isize).pow(2) + (c_loc.c as isize - loc.c as isize).pow(2);
-                if dist_sq < 9 {
+                let dr = (c_loc.r as isize - loc.r as isize).abs();
+                let dc = (c_loc.c as isize - loc.c as isize).abs();
+                if dr < 6 && dc < 6 {
                     too_close = true;
                     break;
                 }
@@ -438,7 +501,12 @@ impl Game {
             _ => !is_land || is_friendly_city, // Naval units can enter land if it is a friendly city
         };
 
-        if !can_enter && ptype != PieceType::Fighter {
+        let is_bombardment = !can_enter 
+            && (ptype == PieceType::Battleship || ptype == PieceType::Destroyer) 
+            && (self.pieces.iter().any(|p| p.loc == target_loc && p.owner != self.pieces[piece_idx].owner && p.hits > 0) 
+                || self.cities.iter().any(|c| c.loc == target_loc && c.owner != self.pieces[piece_idx].owner));
+
+        if !can_enter && ptype != PieceType::Fighter && !is_bombardment {
             return (MoveResult::InvalidMove, String::from("Terrain impassable for this unit type."));
         }
 
@@ -446,21 +514,24 @@ impl Game {
         let mut enemy_idx = None;
         let mut boardable_carrier_idx = None;
 
-        for (i, other) in self.pieces.iter().enumerate() {
-            // Ignore self when checking for tile collisions
-            if i != piece_idx && other.loc == target_loc && other.hits > 0 {
-                if other.owner == Owner::Player {
-                    // Check if the target is a friendly transport/carrier with cargo space
-                    let can_board_transport = ptype == PieceType::Army && other.ptype == PieceType::Transport && other.cargo.len() < 6;
-                    let can_board_carrier = ptype == PieceType::Fighter && other.ptype == PieceType::Carrier && other.cargo.len() < 8;
+        // Satellites orbit high above the battlefield and ignore all collisions
+        if ptype != PieceType::Satellite {
+            for (i, other) in self.pieces.iter().enumerate() {
+                // Ignore self when checking for tile collisions
+                if i != piece_idx && other.loc == target_loc && other.hits > 0 {
+                    if other.owner == Owner::Player {
+                        // Check if the target is a friendly transport/carrier with cargo space
+                        let can_board_transport = ptype == PieceType::Army && other.ptype == PieceType::Transport && other.cargo.len() < 6;
+                        let can_board_carrier = ptype == PieceType::Fighter && other.ptype == PieceType::Carrier && other.cargo.len() < other.hits as usize;
 
-                    if can_board_transport || can_board_carrier {
-                        boardable_carrier_idx = Some(i);
+                        if can_board_transport || can_board_carrier {
+                            boardable_carrier_idx = Some(i);
+                        } else {
+                            return (MoveResult::InvalidMove, String::from("Sector is occupied by a friendly unit."));
+                        }
                     } else {
-                        return (MoveResult::InvalidMove, String::from("Sector is occupied by a friendly unit."));
+                        enemy_idx = Some(i);
                     }
-                } else {
-                    enemy_idx = Some(i);
                 }
             }
         }
@@ -481,16 +552,20 @@ impl Game {
         if let Some(e_idx) = enemy_idx {
             let mut rng = rand::thread_rng();
             let e_type = self.pieces[e_idx].ptype;
+            let p_damage = self.pieces[piece_idx].ptype.strike_damage();
+            let e_damage = e_type.strike_damage();
             
             while self.pieces[piece_idx].hits > 0 && self.pieces[e_idx].hits > 0 {
-                if rng.gen_bool(0.5) { self.pieces[e_idx].hits -= 1; }
-                if self.pieces[e_idx].hits > 0 && rng.gen_bool(0.5) { self.pieces[piece_idx].hits -= 1; }
+                if rng.gen_bool(0.5) { self.pieces[e_idx].hits -= p_damage; }
+                if self.pieces[e_idx].hits > 0 && rng.gen_bool(0.5) { self.pieces[piece_idx].hits -= e_damage; }
             }
 
-            if self.pieces[piece_idx].hits == 0 {
+            if self.pieces[piece_idx].hits <= 0 {
                 return (MoveResult::CombatLost, format!(">>> DEFEAT! Your {:?} was DESTROYED by enemy {:?}! <<<", ptype, e_type));
             } else {
-                self.pieces[piece_idx].loc = target_loc;
+                if !is_bombardment {
+                    self.pieces[piece_idx].loc = target_loc;
+                }
                 self.pieces[piece_idx].moves_left -= 1;
                 self.reveal_vision(target_loc, ptype.sight_range());
                 
@@ -505,7 +580,23 @@ impl Game {
                     }
                 }
                 
-                return (MoveResult::CombatWon, format!(">>> VICTORY! Your {:?} DESTROYED enemy {:?}! <<<", ptype, e_type));
+                if is_bombardment {
+                    return (MoveResult::CombatWon, format!(">>> BOMBARDMENT VICTORY! Your {:?} DESTROYED enemy {:?}! <<<", ptype, e_type));
+                } else {
+                    return (MoveResult::CombatWon, format!(">>> VICTORY! Your {:?} DESTROYED enemy {:?}! <<<", ptype, e_type));
+                }
+            }
+        }
+
+        // 2.5 Empty City Bombardment Check
+        if is_bombardment {
+            for city in self.cities.iter_mut() {
+                if city.loc == target_loc && city.owner != self.pieces[piece_idx].owner {
+                    city.work = 0;
+                    self.pieces[piece_idx].moves_left -= 1;
+                    self.reveal_vision(target_loc, ptype.sight_range());
+                    return (MoveResult::Moved, format!(">>> BOMBARDMENT! Your {:?} shelled the city at ({},{}), resetting its production! <<<", ptype, target_loc.r, target_loc.c));
+                }
             }
         }
 
@@ -539,6 +630,18 @@ impl Game {
         // 4. Standard Move
         self.pieces[piece_idx].loc = target_loc;
         self.pieces[piece_idx].moves_left -= 1;
+        
+        if ptype == PieceType::Fighter {
+            self.pieces[piece_idx].fuel -= 1;
+            let at_base = self.cities.iter().any(|c| c.loc == target_loc && c.owner == Owner::Player);
+            if at_base {
+                self.pieces[piece_idx].fuel = 32;
+            } else if self.pieces[piece_idx].fuel <= 0 {
+                self.pieces[piece_idx].hits = 0;
+                return (MoveResult::CombatLost, format!(">>> MAYDAY! Your Fighter at ({},{}) ran out of fuel and crashed! <<<", target_loc.r, target_loc.c));
+            }
+        }
+        
         self.reveal_vision(target_loc, ptype.sight_range());
         (MoveResult::Moved, String::new())
     }
@@ -549,9 +652,20 @@ impl Game {
         let mut explore_logs = Vec::new();
 
         while self.pieces[piece_idx].moves_left > 0 && self.pieces[piece_idx].hits > 0 {
-            // Extract values early to keep the Rust borrow checker happy
             let ptype = self.pieces[piece_idx].ptype;
             let current_loc = self.pieces[piece_idx].loc;
+            
+            if ptype == PieceType::Fighter {
+                if let Some(dist) = self.dist_to_nearest_base(current_loc) {
+                    if self.pieces[piece_idx].fuel <= dist + 2 {
+                        self.pieces[piece_idx].activity = UnitActivity::Land;
+                        explore_logs.push(format!("Fighter at ({},{}) reached bingo fuel ({} left). Aborting grope and returning to base.", current_loc.r, current_loc.c, self.pieces[piece_idx].fuel));
+                        self.process_land_mode(piece_idx);
+                        break; 
+                    }
+                }
+            }
+
             let dirs = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)];
 
             // 1. Gather all physically valid adjacent steps
@@ -715,6 +829,11 @@ impl Game {
                     moves_left: city.prod.max_moves(),
                     activity: starting_activity,
                     cargo: Vec::new(),
+                    fuel: match city.prod {
+                        PieceType::Fighter => 32,
+                        PieceType::Satellite => 20, // 20 turns of orbital lifespan
+                        _ => 0,
+                    },
                 });
             }
         }
@@ -731,11 +850,12 @@ impl Game {
         let mut auto_dir_indices = Vec::new();
         let mut auto_fill_indices = Vec::new();
         let mut auto_upgrade_indices = Vec::new();
+        let mut auto_land_indices = Vec::new();
         let mut wakeup_logs = Vec::new();
 
-        let enemy_locs: Vec<Loc> = self.pieces.iter()
-            .filter(|p| p.owner != Owner::Player && p.hits > 0)
-            .map(|p| p.loc)
+        let enemy_locs: Vec<Loc> = self.pieces.iter().enumerate()
+            .filter(|(i, p)| p.owner != Owner::Player && p.hits > 0 && self.is_visible_to(*i, Owner::Player))
+            .map(|(_, p)| p.loc)
             .collect();
 
         for (idx, p) in self.pieces.iter_mut().enumerate() {
@@ -757,8 +877,13 @@ impl Game {
                     }
                     
                     if should_wake {
-                        p.activity = UnitActivity::Idle;
-                        wakeup_logs.push(format!("{:?} on sentry duty at ({},{}) spotted an enemy and woke up!", p.ptype, p.loc.r, p.loc.c));
+                        if p.ptype == PieceType::Fighter {
+                            p.activity = UnitActivity::Attack;
+                            wakeup_logs.push(format!("CAP INTERCEPT: Fighter on sentry at ({},{}) scrambled to attack!", p.loc.r, p.loc.c));
+                        } else {
+                            p.activity = UnitActivity::Idle;
+                            wakeup_logs.push(format!("{:?} on sentry duty at ({},{}) spotted an enemy and woke up!", p.ptype, p.loc.r, p.loc.c));
+                        }
                     }
                 }
 
@@ -776,6 +901,8 @@ impl Game {
                     auto_fill_indices.push(idx);
                 } else if p.activity == UnitActivity::Upgrade {
                     auto_upgrade_indices.push(idx);
+                } else if p.activity == UnitActivity::Land {
+                    auto_land_indices.push(idx);
                 }
             }
         }
@@ -805,6 +932,23 @@ impl Game {
         for idx in auto_upgrade_indices {
             self.process_upgrade_mode(idx);
         }
+        for idx in auto_land_indices {
+            self.process_land_mode(idx);
+        }
+
+        let mut dead_sats = Vec::new();
+        for p in self.pieces.iter_mut() {
+            if p.ptype == PieceType::Satellite && p.hits > 0 {
+                p.fuel -= 1; // Orbit decays by 1 turn
+                if p.fuel <= 0 {
+                    p.hits = 0;
+                    dead_sats.push(format!("Satellite at ({},{}) burned up in the atmosphere.", p.loc.r, p.loc.c));
+                }
+            }
+        }
+        for msg in dead_sats {
+            self.log(msg);
+        }
 
         self.pieces.retain(|p| p.hits > 0);
     }
@@ -814,10 +958,10 @@ impl Game {
         let mut attack_logs = Vec::new();
 
         while self.pieces[piece_idx].moves_left > 0 && self.pieces[piece_idx].hits > 0 {
-            // ONLY target enemies that the player has actually discovered in the fog
-            let enemy_locs: Vec<Loc> = self.pieces.iter()
-                .filter(|p| p.owner != Owner::Player && p.hits > 0 && self.player_map[p.loc.r][p.loc.c] != 0)
-                .map(|p| p.loc)
+            // ONLY target enemies that the player has actually discovered in the fog (and are not hidden submarines)
+            let enemy_locs: Vec<Loc> = self.pieces.iter().enumerate()
+                .filter(|(i, p)| p.owner != Owner::Player && p.hits > 0 && self.is_visible_to(*i, Owner::Player))
+                .map(|(_, p)| p.loc)
                 .collect();
 
             // ONLY target non-player cities that have been revealed on the map
@@ -831,6 +975,19 @@ impl Game {
 
             let p = &self.pieces[piece_idx];
             let current_loc = p.loc;
+            let ptype = p.ptype;
+
+            if ptype == PieceType::Fighter {
+                if let Some(dist) = self.dist_to_nearest_base(current_loc) {
+                    if self.pieces[piece_idx].fuel <= dist + 2 {
+                        self.pieces[piece_idx].activity = UnitActivity::Land;
+                        attack_logs.push(format!("Fighter at ({},{}) reached bingo fuel. Aborting attack and returning to base.", current_loc.r, current_loc.c));
+                        self.process_land_mode(piece_idx);
+                        break; 
+                    }
+                }
+            }
+
             let dirs = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)];
 
             // 1. Gather all physically valid moves
@@ -841,8 +998,10 @@ impl Game {
 
                 if target_r < self.rows && target_c < self.cols {
                     let is_land = self.map[target_r][target_c] == b'#';
+                    let target_rc = Loc { r: target_r, c: target_c };
                     let can_enter = match p.ptype {
                         PieceType::Army => is_land,
+                        PieceType::Battleship | PieceType::Destroyer => !is_land || all_targets.contains(&target_rc),
                         _ => !is_land,
                     };
 
@@ -912,9 +1071,11 @@ impl Game {
                     if target_r < self.rows && target_c < self.cols {
                         if !visited[target_r][target_c] {
                             let is_land = self.map[target_r][target_c] == b'#';
+                            let target_rc = Loc { r: target_r, c: target_c };
                             let can_enter = match p.ptype {
                                 PieceType::Army => is_land,
                                 PieceType::Fighter | PieceType::Satellite => true,
+                                PieceType::Battleship | PieceType::Destroyer => !is_land || all_targets.contains(&target_rc),
                                 _ => !is_land,
                             };
 
@@ -1035,6 +1196,17 @@ impl Game {
             let current_loc = self.pieces[piece_idx].loc;
             let ptype = self.pieces[piece_idx].ptype;
 
+            if ptype == PieceType::Fighter {
+                if let Some(dist) = self.dist_to_nearest_base(current_loc) {
+                    if self.pieces[piece_idx].fuel <= dist + 2 {
+                        self.pieces[piece_idx].activity = UnitActivity::Land;
+                        dest_logs.push(format!("Fighter at ({},{}) reached bingo fuel. Route cancelled, returning to base.", current_loc.r, current_loc.c));
+                        self.process_land_mode(piece_idx);
+                        break;
+                    }
+                }
+            }
+
             if current_loc == target_loc {
                 self.pieces[piece_idx].activity = UnitActivity::Idle;
                 dest_logs.push(format!("{:?} arrived at destination ({},{}). Awaiting orders.", ptype, target_loc.r, target_loc.c));
@@ -1049,15 +1221,16 @@ impl Game {
                 let c = (current_loc.c as i32 + dir.1) as usize;
 
                 if r < self.rows && c < self.cols {
+                    let step_loc = Loc { r, c };
                     let is_land = self.map[r][c] == b'#';
+                    let friendly_city = self.cities.iter().any(|ct| ct.loc == step_loc && ct.owner == Owner::Player);
+                    
                     let can_enter = match ptype {
                         PieceType::Army => is_land,
-                        _ => !is_land,
+                        _ => !is_land || friendly_city,
                     };
 
                     if can_enter || ptype == PieceType::Fighter {
-                        let step_loc = Loc { r, c };
-                        let friendly_city = self.cities.iter().any(|ct| ct.loc == step_loc && ct.owner == Owner::Player);
                         let occupied_by_friend = self.pieces.iter().any(|other| other.loc == step_loc && other.owner == Owner::Player && other.hits > 0);
                         
                         // Treat the exact destination as valid even if occupied, so we can march up to it
@@ -1107,10 +1280,11 @@ impl Game {
 
                     if r < self.rows && c < self.cols && !visited[r][c] {
                         let is_land = self.map[r][c] == b'#';
+                        let friendly_city = self.cities.iter().any(|ct| ct.loc == Loc { r, c } && ct.owner == Owner::Player);
                         let can_enter = match ptype {
                             PieceType::Army => is_land,
                             PieceType::Fighter | PieceType::Satellite => true,
-                            _ => !is_land,
+                            _ => !is_land || friendly_city,
                         };
 
                         if can_enter {
@@ -1166,30 +1340,45 @@ impl Game {
             let current_loc = self.pieces[piece_idx].loc;
             let ptype = self.pieces[piece_idx].ptype;
 
+            if ptype == PieceType::Fighter {
+                if let Some(dist) = self.dist_to_nearest_base(current_loc) {
+                    if self.pieces[piece_idx].fuel <= dist + 2 {
+                        self.pieces[piece_idx].activity = UnitActivity::Land;
+                        dir_logs.push(format!("Fighter at ({},{}) reached bingo fuel. March halted, returning to base.", current_loc.r, current_loc.c));
+                        self.process_land_mode(piece_idx);
+                        break;
+                    }
+                }
+            }
+
             let target_r = current_loc.r as i32 + dr;
             let target_c = current_loc.c as i32 + dc;
 
             // Halt if it marches off the edge of the world
             if target_r < 0 || target_r >= self.rows as i32 || target_c < 0 || target_c >= self.cols as i32 {
-                self.pieces[piece_idx].activity = UnitActivity::Idle;
-                dir_logs.push(format!("{:?} reached the edge of the map. March halted.", ptype));
+                if ptype == PieceType::Satellite {
+                    self.pieces[piece_idx].hits = 0;
+                    dir_logs.push(String::from("Satellite flew out of orbit and was lost."));
+                } else {
+                    self.pieces[piece_idx].activity = UnitActivity::Idle;
+                    dir_logs.push(format!("{:?} reached the edge of the map. March halted.", ptype));
+                }
                 self.pieces[piece_idx].moves_left = 0;
                 break;
             }
 
             let target_loc = Loc { r: target_r as usize, c: target_c as usize };
             let is_land = self.map[target_loc.r][target_loc.c] == b'#';
+            let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
             
             let can_enter = match ptype {
                 PieceType::Army => is_land,
-                _ => !is_land,
+                _ => !is_land || friendly_city,
             };
-
-            let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
             let occupied_by_friend = self.pieces.iter().any(|other| other.loc == target_loc && other.owner == Owner::Player && other.hits > 0);
 
             // Directional march halts immediately if blocked by terrain or friends
-            if (!can_enter && ptype != PieceType::Fighter) || friendly_city || occupied_by_friend {
+            if ptype != PieceType::Satellite && ((!can_enter && ptype != PieceType::Fighter) || friendly_city || occupied_by_friend) {
                 self.pieces[piece_idx].activity = UnitActivity::Idle;
                 dir_logs.push(format!("{:?} hit an obstacle at ({},{}) and halted its march.", ptype, target_loc.r, target_loc.c));
                 self.pieces[piece_idx].moves_left = 0;
@@ -1249,7 +1438,7 @@ impl Game {
         
         let max_cargo = match ptype {
             PieceType::Transport => 6,
-            PieceType::Carrier => 8,
+            PieceType::Carrier => self.pieces[piece_idx].hits as usize,
             _ => 0,
         };
 
@@ -1361,5 +1550,96 @@ impl Game {
         
         self.pieces.extend(awakened_units);
         self.log(format!("{:?} at ({},{}) awakened its cargo for deployment.", self.pieces[piece_idx].ptype, t_loc.r, t_loc.c));
+    }
+
+    pub fn process_land_mode(&mut self, piece_idx: usize) {
+        if self.pieces[piece_idx].owner != Owner::Player || self.pieces[piece_idx].hits <= 0 { return; }
+        if self.pieces[piece_idx].ptype != PieceType::Fighter { 
+            self.pieces[piece_idx].activity = UnitActivity::Idle;
+            return;
+        }
+        
+        let p_loc = self.pieces[piece_idx].loc;
+        
+        if self.cities.iter().any(|c| c.loc == p_loc && c.owner == Owner::Player) {
+            self.pieces[piece_idx].activity = UnitActivity::Idle;
+            self.pieces[piece_idx].moves_left = self.pieces[piece_idx].ptype.max_moves();
+            self.pieces[piece_idx].fuel = 32;
+            self.log(format!("Fighter landed at ({},{}) and refueled.", p_loc.r, p_loc.c));
+            return;
+        }
+        
+        let mut valid_targets = Vec::new();
+        for city in &self.cities {
+            if city.owner == Owner::Player {
+                valid_targets.push(city.loc);
+            }
+        }
+        for (i, piece) in self.pieces.iter().enumerate() {
+            if i != piece_idx && piece.owner == Owner::Player && piece.ptype == PieceType::Carrier && piece.hits > 0 && piece.cargo.len() < piece.hits as usize {
+                valid_targets.push(piece.loc);
+            }
+        }
+        
+        if valid_targets.is_empty() {
+            self.log(String::from("Fighter has no available bases or carriers to land on!"));
+            self.pieces[piece_idx].moves_left = 0;
+            return;
+        }
+        
+        let mut closest_loc = valid_targets[0];
+        let mut min_dist = (p_loc.r as isize - closest_loc.r as isize).pow(2) + (p_loc.c as isize - closest_loc.c as isize).pow(2);
+        
+        for &loc in &valid_targets[1..] {
+            let dist = (p_loc.r as isize - loc.r as isize).pow(2) + (p_loc.c as isize - loc.c as isize).pow(2);
+            if dist < min_dist {
+                min_dist = dist;
+                closest_loc = loc;
+            }
+        }
+        
+        self.pieces[piece_idx].activity = UnitActivity::Dest(closest_loc);
+        self.dest_piece(piece_idx);
+        
+        // Re-apply Land mode after dest_piece routing processes the single turn's movement
+        if self.pieces[piece_idx].hits > 0 && self.pieces[piece_idx].activity != UnitActivity::Idle {
+            self.pieces[piece_idx].activity = UnitActivity::Land;
+        }
+    }
+
+    pub fn check_game_over(&self) -> Option<String> {
+        let player_cities = self.cities.iter().filter(|c| c.owner == Owner::Player).count();
+        let comp_cities = self.cities.iter().filter(|c| c.owner == Owner::Comp).count();
+        
+        let player_units = self.pieces.iter().filter(|p| p.owner == Owner::Player && p.hits > 0).count();
+        let comp_units = self.pieces.iter().filter(|p| p.owner == Owner::Comp && p.hits > 0).count();
+
+        if comp_cities == 0 && comp_units == 0 {
+            return Some(String::from(">>> VICTORY! The enemy has been completely eradicated! <<<"));
+        }
+
+        if player_cities == 0 && player_units == 0 {
+            return Some(String::from(">>> DEFEAT! Your forces are destroyed and your empire has fallen! <<<"));
+        }
+
+        if player_cities == self.cities.len() {
+            return Some(String::from(">>> TOTAL DOMINATION! You have captured every city on the globe! <<<"));
+        }
+
+        None
+    }
+
+    pub fn save_game(&self, filename: &str) {
+        if let Ok(data) = serde_json::to_string(self) {
+            let _ = std::fs::write(filename, data);
+        }
+    }
+
+    pub fn load_game(filename: &str) -> Option<Self> {
+        if let Ok(data) = std::fs::read_to_string(filename) {
+            serde_json::from_str(&data).ok()
+        } else {
+            None
+        }
     }
 }

@@ -95,14 +95,9 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                     continue;
                 }
 
-                // Handle active unit or city blink state
                 let mut rendered_span = None;
                 if (game.mode == GameMode::Edit || matches!(game.mode, GameMode::PickDest(_))) && game.edit_cursor == loc {
                     rendered_span = Some(Span::styled("█", Style::default().fg(Color::White)));
-                } else if let Some((blink_loc, show_unit)) = active_blink {
-                    if blink_loc == loc && !show_unit {
-                        rendered_span = Some(Span::raw(" "));
-                    }
                 }
 
                 if let Some(span) = rendered_span {
@@ -110,42 +105,48 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                     continue;
                 }
 
-                // Check pieces
-                let piece_opt = game.pieces.iter().find(|p| p.loc == loc);
-                if let Some(p) = piece_opt {
-                    let ch = match p.ptype {
-                        PieceType::Army => if p.owner == Owner::Player { 'A' } else { 'a' },
-                        PieceType::Fighter => if p.owner == Owner::Player { 'F' } else { 'f' },
-                        PieceType::PatrolBoat => if p.owner == Owner::Player { 'P' } else { 'p' },
-                        PieceType::Destroyer => if p.owner == Owner::Player { 'D' } else { 'd' },
-                        PieceType::Submarine => if p.owner == Owner::Player { 'S' } else { 's' },
-                        PieceType::Carrier => if p.owner == Owner::Player { 'C' } else { 'c' },
-                        PieceType::Battleship => if p.owner == Owner::Player { 'B' } else { 'b' },
-                        PieceType::Transport => if p.owner == Owner::Player { 'T' } else { 't' },
-                        PieceType::Satellite => if p.owner == Owner::Player { 'Z' } else { 'z' },
-                    };
+                let is_blink_off = active_blink.map_or(false, |(b_loc, show)| b_loc == loc && !show);
 
-                    let color = if p.owner == Owner::Player { Color::Cyan } else { Color::LightRed };
-                    spans.push(Span::styled(ch.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
-                    continue;
+                // Check pieces
+                let piece_opt = game.pieces.iter().enumerate().find(|(i, p)| p.loc == loc && game.is_visible_to(*i, Owner::Player)).map(|(_, p)| p);
+                if let Some(p) = piece_opt {
+                    if !is_blink_off {
+                        let ch = match p.ptype {
+                            PieceType::Army => if p.owner == Owner::Player { 'A' } else { 'a' },
+                            PieceType::Fighter => if p.owner == Owner::Player { 'F' } else { 'f' },
+                            PieceType::PatrolBoat => if p.owner == Owner::Player { 'P' } else { 'p' },
+                            PieceType::Destroyer => if p.owner == Owner::Player { 'D' } else { 'd' },
+                            PieceType::Submarine => if p.owner == Owner::Player { 'S' } else { 's' },
+                            PieceType::Carrier => if p.owner == Owner::Player { 'C' } else { 'c' },
+                            PieceType::Battleship => if p.owner == Owner::Player { 'B' } else { 'b' },
+                            PieceType::Transport => if p.owner == Owner::Player { 'T' } else { 't' },
+                            PieceType::Satellite => if p.owner == Owner::Player { 'Z' } else { 'z' },
+                        };
+
+                        let color = if p.owner == Owner::Player { Color::Cyan } else { Color::LightRed };
+                        spans.push(Span::styled(ch.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                        continue;
+                    }
                 }
 
                 // Check cities
                 let city_opt = game.cities.iter().find(|ct| ct.loc == loc);
                 if let Some(city) = city_opt {
-                    let ch = match city.owner {
-                        Owner::Player => 'O',
-                        Owner::Comp => 'X',
-                        Owner::Neutral => '*',
-                    };
+                    if !(is_blink_off && piece_opt.is_none()) {
+                        let ch = match city.owner {
+                            Owner::Player => 'O',
+                            Owner::Comp => 'X',
+                            Owner::Neutral => '*',
+                        };
 
-                    let color = match city.owner {
-                        Owner::Player => Color::Green,
-                        Owner::Comp => Color::Red,
-                        Owner::Neutral => Color::Yellow,
-                    };
-                    spans.push(Span::styled(ch.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
-                    continue;
+                        let color = match city.owner {
+                            Owner::Player => Color::Green,
+                            Owner::Comp => Color::Red,
+                            Owner::Neutral => Color::Yellow,
+                        };
+                        spans.push(Span::styled(ch.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                        continue;
+                    }
                 }
 
                 // Terrain
@@ -194,11 +195,16 @@ let mut sidebar_lines = vec![
                     }
                 }
                 
-                if let Some(piece) = game.pieces.iter().find(|p| p.loc == loc && p.hits > 0) {
+                if let Some(piece) = game.pieces.iter().enumerate().find(|(i, p)| p.loc == loc && p.hits > 0 && game.is_visible_to(*i, Owner::Player)).map(|(_, p)| p) {
                     let owner_str = match piece.owner { Owner::Player => "Player", Owner::Comp => "Enemy", Owner::Neutral => "Neutral" };
                     sidebar_lines.push(Line::from(format!(" Unit: {} {:?}", owner_str, piece.ptype)));
                     if piece.owner == Owner::Player {
                         sidebar_lines.push(Line::from(format!(" Hits: {}/{}", piece.hits, piece.ptype.max_hits())));
+                        if piece.ptype == PieceType::Fighter {
+                            sidebar_lines.push(Line::from(format!(" Fuel: {}/32", piece.fuel)));
+                        } else if piece.ptype == PieceType::Satellite {
+                            sidebar_lines.push(Line::from(format!(" Orbit: {}/20", piece.fuel)));
+                        }
                         sidebar_lines.push(Line::from(format!(" Moves: {}/{}", piece.moves_left, piece.ptype.max_moves())));
                         sidebar_lines.push(Line::from(format!(" Order: {:?}", piece.activity)));
                         if !piece.cargo.is_empty() {
