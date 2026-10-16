@@ -1,6 +1,6 @@
 [package]
-name = "vms-empire"
-version = "0.1.0"
+name = "rs-empire"
+version = "0.3.0-alpha"
 edition = "2021"
 
 [dependencies]
