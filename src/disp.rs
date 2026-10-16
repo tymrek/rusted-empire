@@ -1,4 +1,5 @@
 use crate::game::{Game, GameMode, Owner, PieceType, Loc};
+use std::collections::HashMap;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -26,6 +27,7 @@ pub fn refresh_display_with_input(game: &Game, prompt: &str) {
 }
 
 pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_blink: Option<(Loc, bool)>) {
+    let render_start = std::time::Instant::now();
     let terminal = get_terminal();
 
     terminal.draw(|f| {
@@ -61,7 +63,9 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         let sidebar_area = upper_chunks[1];
 
         // Center camera on edit cursor, or active unit if blinking, otherwise player capital
-        let mut center_loc = if game.mode == GameMode::Edit || matches!(game.mode, GameMode::PickDest(_)) {
+        let center_loc = if let Some(vp) = game.viewport_center {
+            vp
+        } else if game.mode == GameMode::Edit || matches!(game.mode, GameMode::PickDest(_)) {
             game.edit_cursor
         } else if let Some((loc, _)) = active_blink {
             loc
@@ -71,9 +75,6 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                 .map(|c| c.loc)
                 .unwrap_or(Loc { r: game.rows / 2, c: game.cols / 2 })
         };
-        
-        center_loc.r = (center_loc.r as i32 + game.map_offset_r).clamp(0, game.rows.saturating_sub(1) as i32) as usize;
-        center_loc.c = (center_loc.c as i32 + game.map_offset_c).clamp(0, game.cols.saturating_sub(1) as i32) as usize;
 
         let view_height = map_area.height.saturating_sub(2) as usize;
         let view_width = map_area.width.saturating_sub(2) as usize;
@@ -87,6 +88,24 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         let start_c = center_loc.c.saturating_sub(half_w).min(game.cols.saturating_sub(view_width));
         let end_c = (start_c + view_width).min(game.cols);
 
+        // Pre-compute visible pieces in viewport to eliminate O(V * P) loop
+        let mut viewport_pieces = HashMap::new();
+        for (i, p) in game.pieces.iter().enumerate() {
+            if p.loc.r >= start_r && p.loc.r < end_r && p.loc.c >= start_c && p.loc.c < end_c {
+                if game.is_visible_to(i, Owner::Player) {
+                    viewport_pieces.entry(p.loc).or_insert(p); // Keeps the first piece found at loc
+                }
+            }
+        }
+
+        // Pre-compute cities in viewport
+        let mut viewport_cities = HashMap::new();
+        for city in game.cities.iter() {
+            if city.loc.r >= start_r && city.loc.r < end_r && city.loc.c >= start_c && city.loc.c < end_c {
+                viewport_cities.entry(city.loc).or_insert(city);
+            }
+        }
+
         let mut lines = Vec::new();
         for r in start_r..end_r {
             let mut spans = Vec::new();
@@ -99,13 +118,8 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                     continue;
                 }
 
-                let mut rendered_span = None;
                 if (game.mode == GameMode::Edit || matches!(game.mode, GameMode::PickDest(_))) && game.edit_cursor == loc {
-                    rendered_span = Some(Span::styled("█", Style::default().fg(Color::White)));
-                }
-
-                if let Some(span) = rendered_span {
-                    spans.push(span);
+                    spans.push(Span::styled("█", Style::default().fg(Color::White)));
                     continue;
                 }
 
@@ -113,37 +127,37 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                 let is_blink_off = is_blink_target && !active_blink.unwrap().1;
 
                 // Check pieces
-                let piece_opt = game.pieces.iter().enumerate().find(|(i, p)| p.loc == loc && game.is_visible_to(*i, Owner::Player)).map(|(_, p)| p);
+                let piece_opt = viewport_pieces.get(&loc).copied();
                 if let Some(p) = piece_opt {
                     if !is_blink_off {
-                        let ch = match p.ptype {
-                            PieceType::Army => if p.owner == Owner::Player { 'A' } else { 'a' },
-                            PieceType::Fighter => if p.owner == Owner::Player { 'F' } else { 'f' },
-                            PieceType::PatrolBoat => if p.owner == Owner::Player { 'P' } else { 'p' },
-                            PieceType::Destroyer => if p.owner == Owner::Player { 'D' } else { 'd' },
-                            PieceType::Submarine => if p.owner == Owner::Player { 'S' } else { 's' },
-                            PieceType::Carrier => if p.owner == Owner::Player { 'C' } else { 'c' },
-                            PieceType::Battleship => if p.owner == Owner::Player { 'B' } else { 'b' },
-                            PieceType::Transport => if p.owner == Owner::Player { 'T' } else { 't' },
-                            PieceType::Satellite => if p.owner == Owner::Player { 'Z' } else { 'z' },
+                        let ch_str = match p.ptype {
+                            PieceType::Army => if p.owner == Owner::Player { "A" } else { "a" },
+                            PieceType::Fighter => if p.owner == Owner::Player { "F" } else { "f" },
+                            PieceType::PatrolBoat => if p.owner == Owner::Player { "P" } else { "p" },
+                            PieceType::Destroyer => if p.owner == Owner::Player { "D" } else { "d" },
+                            PieceType::Submarine => if p.owner == Owner::Player { "S" } else { "s" },
+                            PieceType::Carrier => if p.owner == Owner::Player { "C" } else { "c" },
+                            PieceType::Battleship => if p.owner == Owner::Player { "B" } else { "b" },
+                            PieceType::Transport => if p.owner == Owner::Player { "T" } else { "t" },
+                            PieceType::Satellite => if p.owner == Owner::Player { "Z" } else { "z" },
                         };
 
                         let color = if p.owner == Owner::Player { Color::Cyan } else { Color::LightRed };
                         let mut style = Style::default().fg(color).add_modifier(Modifier::BOLD);
                         if is_blink_target { style = style.bg(Color::White).fg(Color::Black); }
-                        spans.push(Span::styled(ch.to_string(), style));
+                        spans.push(Span::styled(ch_str, style));
                         continue;
                     }
                 }
 
                 // Check cities
-                let city_opt = game.cities.iter().find(|ct| ct.loc == loc);
+                let city_opt = viewport_cities.get(&loc).copied();
                 if let Some(city) = city_opt {
                     if !(is_blink_off && piece_opt.is_none()) {
-                        let ch = match city.owner {
-                            Owner::Player => 'O',
-                            Owner::Comp => 'X',
-                            Owner::Neutral => '*',
+                        let ch_str = match city.owner {
+                            Owner::Player => "O",
+                            Owner::Comp => "X",
+                            Owner::Neutral => "*",
                         };
 
                         let color = match city.owner {
@@ -153,17 +167,17 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                         };
                         let mut style = Style::default().fg(color).add_modifier(Modifier::BOLD);
                         if is_blink_target { style = style.bg(Color::White).fg(Color::Black); }
-                        spans.push(Span::styled(ch.to_string(), style));
+                        spans.push(Span::styled(ch_str, style));
                         continue;
                     }
                 }
 
                 // Terrain
-                let terrain_ch = game.map[r][c] as char;
-                let mut style = if terrain_ch == '#' { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Blue) };
+                let terrain_ch = game.map[r][c];
+                let mut style = if terrain_ch == b'#' { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Blue) };
                 if is_blink_target { style = style.bg(Color::White).fg(Color::Black); }
                 
-                if terrain_ch == '#' {
+                if terrain_ch == b'#' {
                     spans.push(Span::styled("#", style));
                 } else {
                     spans.push(Span::styled(".", style));
@@ -204,8 +218,18 @@ let mut sidebar_lines = vec![
                     sidebar_lines.push(Line::from(format!(" City: {}", owner_str)));
                     if city.owner == Owner::Player {
                         sidebar_lines.push(Line::from(format!(" Prod: {:?} ({}/{})", city.prod, city.work, city.prod.build_cost())));
-                        if let Some((_, act)) = city.default_orders.iter().find(|(p, _)| *p == city.prod) {
-                            sidebar_lines.push(Line::from(format!(" City Ord: {:?}", act)));
+                        
+                        if !city.default_orders.is_empty() {
+                            sidebar_lines.push(Line::from(" Local Orders:"));
+                            for (p, a) in &city.default_orders {
+                                sidebar_lines.push(Line::from(format!("  {:?} -> {:?}", p, a)));
+                            }
+                        } else {
+                            sidebar_lines.push(Line::from(" Local Orders: None"));
+                        }
+                        
+                        if let Some((_, act)) = game.default_orders.iter().find(|(p, _)| *p == city.prod) {
+                            sidebar_lines.push(Line::from(format!(" Glob Fallback: {:?}", act)));
                         }
                     }
                 }
@@ -294,4 +318,13 @@ let mut sidebar_lines = vec![
             .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
         f.render_widget(prompt_widget, prompt_area);
     }).unwrap();
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("empire_debug.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "frame_draw_us: {}", render_start.elapsed().as_micros());
+    }
 }

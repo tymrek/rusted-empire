@@ -29,8 +29,7 @@ macro_rules! debug_log {
 }
 
 fn prompt_city_production(game: &mut Game, city_idx: usize) {
-    game.map_offset_r = 0;
-    game.map_offset_c = 0;
+    game.viewport_center = None;
     let city_loc = game.cities[city_idx].loc;
     let prompt_msg = format!(
         "New City at ({},{}) Build? [A]rmy, [T]rns, [P]tBoat, [D]est, [S]ub, [C]arr, [B]ttle, [F]ght, [Z]Sat: ",
@@ -90,7 +89,6 @@ fn main() -> io::Result<()> {
     {
         let _ = std::fs::File::create("empire_debug.log");
         if let Ok(mut file) = std::fs::File::create("ai_metrics.csv") {
-            use std::io::Write;
             let _ = writeln!(file, "Turn,Comp_Cities,Comp_Units");
         }
     }
@@ -219,9 +217,13 @@ fn main() -> io::Result<()> {
                                 game.last_mouse_coord = None;
                             }
                             crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                                let mut current = game.viewport_center.unwrap_or(game.edit_cursor);
                                 if let Some((last_c, last_r)) = game.last_mouse_coord {
-                                    game.map_offset_c -= mouse.column as i32 - last_c as i32;
-                                    game.map_offset_r -= mouse.row as i32 - last_r as i32;
+                                    let dc = mouse.column as i32 - last_c as i32;
+                                    let dr = mouse.row as i32 - last_r as i32;
+                                    current.c = (current.c as i32 - dc).clamp(0, game.cols as i32 - 1) as usize;
+                                    current.r = (current.r as i32 - dr).clamp(0, game.rows as i32 - 1) as usize;
+                                    game.viewport_center = Some(current);
                                 }
                                 game.last_mouse_coord = Some((mouse.column, mouse.row));
                             }
@@ -230,8 +232,7 @@ fn main() -> io::Result<()> {
                     }
 
                     if let Event::Key(key) = ev {
-                        game.map_offset_r = 0;
-                        game.map_offset_c = 0;
+                        game.viewport_center = None;
                         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                             let mut stdout = io::stdout();
                             let _ = stdout.execute(crossterm::event::DisableMouseCapture);
@@ -304,99 +305,116 @@ fn main() -> io::Result<()> {
                                 }
                             }
                             KeyCode::Char('i') | KeyCode::Char('I') => {
-                                if let Some(c_idx) = game.cities.iter().position(|c| c.loc == game.edit_cursor && c.owner == Owner::Player) {
-                                    let prompt = "City Order? [A]rmy,[T]rns,[P]tBoat,[D]est,[S]ub,[C]arr,[B]ttle,[F]ght,[Z]Sat (Esc to cancel): ";
-                                    disp::refresh_display_with_input(&game, prompt);
-                                    let mut selected_ptype = None;
-                                    loop {
-                                        if let Ok(Event::Key(k)) = event::read() {
-                                            if k.code == KeyCode::Esc { break; }
-                                            if let KeyCode::Char(c) = k.code {
-                                                selected_ptype = match c.to_ascii_lowercase() {
-                                                    'a' => Some(PieceType::Army),
-                                                    't' => Some(PieceType::Transport),
-                                                    'p' => Some(PieceType::PatrolBoat),
-                                                    'd' => Some(PieceType::Destroyer),
-                                                    's' => Some(PieceType::Submarine),
-                                                    'c' => Some(PieceType::Carrier),
-                                                    'b' => Some(PieceType::Battleship),
-                                                    'f' => Some(PieceType::Fighter),
-                                                    'z' | 'l' => Some(PieceType::Satellite),
-                                                    _ => None,
-                                                };
-                                                if selected_ptype.is_some() { break; }
-                                            }
+                                let c_idx_opt = game.cities.iter().position(|c| c.loc == game.edit_cursor && c.owner == Owner::Player);
+                                
+                                let prompt = if c_idx_opt.is_some() {
+                                    format!("LOCAL City({},{}) Order? [A]rmy,[T]rns,[P]tBoat,[D]est,[S]ub,[C]arr,[B]ttle,[F]ght,[Z]Sat: ", game.edit_cursor.r, game.edit_cursor.c)
+                                } else {
+                                    String::from("GLOBAL Order (ALL cities)? [A]rmy,[T]rns,[P]tBoat,[D]est,[S]ub,[C]arr,[B]ttle,[F]ght,[Z]Sat: ")
+                                };
+                                
+                                disp::refresh_display_with_input(&game, &prompt);
+                                let mut selected_ptype = None;
+                                loop {
+                                    if let Ok(Event::Key(k)) = event::read() {
+                                        if k.code == KeyCode::Esc { break; }
+                                        if let KeyCode::Char(c) = k.code {
+                                            selected_ptype = match c.to_ascii_lowercase() {
+                                                'a' => Some(PieceType::Army),
+                                                't' => Some(PieceType::Transport),
+                                                'p' => Some(PieceType::PatrolBoat),
+                                                'd' => Some(PieceType::Destroyer),
+                                                's' => Some(PieceType::Submarine),
+                                                'c' => Some(PieceType::Carrier),
+                                                'b' => Some(PieceType::Battleship),
+                                                'f' => Some(PieceType::Fighter),
+                                                'z' | 'l' => Some(PieceType::Satellite),
+                                                _ => None,
+                                            };
+                                            if selected_ptype.is_some() { break; }
                                         }
                                     }
-                                    if let Some(ptype) = selected_ptype {
-                                        let prompt2 = format!("City Order for {:?} - [S]entry, [Y]attack, [G]rope, [F]ill, [L]and, [T]rnsWait, [U]pgrade, [R]andom, [V]ector, [W]ake/Idle: ", ptype);
-                                        disp::refresh_display_with_input(&game, &prompt2);
-                                        let mut new_act = None;
-                                        loop {
-                                            if let Ok(Event::Key(k)) = event::read() {
-                                                if k.code == KeyCode::Esc {
-                                                    game.log(String::from("City order update cancelled."));
-                                                    break;
-                                                }
-                                                if let KeyCode::Char(c) = k.code {
-                                                    let choice = c.to_ascii_lowercase();
-                                                    if choice == 'v' {
-                                                        let dir_prompt = format!("Set city march direction for {:?} [Arrows/NumPad] or [Esc] Cancel: ", ptype);
-                                                        disp::refresh_display_with_input(&game, &dir_prompt);
-                                                        let mut chosen_dir = None;
-                                                        loop {
-                                                            if let Ok(Event::Key(dk)) = event::read() {
-                                                                if dk.code == KeyCode::Esc { break; }
-                                                                match dk.code {
-                                                                    KeyCode::Char('8') | KeyCode::Up => { chosen_dir = Some((-1, 0)); break; }
-                                                                    KeyCode::Char('2') | KeyCode::Down => { chosen_dir = Some((1, 0)); break; }
-                                                                    KeyCode::Char('4') | KeyCode::Left => { chosen_dir = Some((0, -1)); break; }
-                                                                    KeyCode::Char('6') | KeyCode::Right => { chosen_dir = Some((0, 1)); break; }
-                                                                    KeyCode::Char('7') => { chosen_dir = Some((-1, -1)); break; }
-                                                                    KeyCode::Char('9') => { chosen_dir = Some((-1, 1)); break; }
-                                                                    KeyCode::Char('1') => { chosen_dir = Some((1, -1)); break; }
-                                                                    KeyCode::Char('3') => { chosen_dir = Some((1, 1)); break; }
-                                                                    _ => {}
-                                                                }
+                                }
+                                
+                                if let Some(ptype) = selected_ptype {
+                                    let prompt2 = if c_idx_opt.is_some() {
+                                        format!("LOCAL City({},{}) Order for {:?} - [S]entry, [Y]attack, [G]rope, [F]ill, [L]and, [W]ake: ", game.edit_cursor.r, game.edit_cursor.c, ptype)
+                                    } else {
+                                        format!("GLOBAL Order for {:?} - [S]entry, [Y]attack, [G]rope, [F]ill, [L]and, [W]ake: ", ptype)
+                                    };
+                                    disp::refresh_display_with_input(&game, &prompt2);
+                                    let mut new_act = None;
+                                    loop {
+                                        if let Ok(Event::Key(k)) = event::read() {
+                                            if k.code == KeyCode::Esc {
+                                                game.log(String::from("Order update cancelled."));
+                                                break;
+                                            }
+                                            if let KeyCode::Char(c) = k.code {
+                                                let choice = c.to_ascii_lowercase();
+                                                if choice == 'v' {
+                                                    let dir_prompt = format!("Set march direction for {:?} [Arrows/NumPad] or [Esc] Cancel: ", ptype);
+                                                    disp::refresh_display_with_input(&game, &dir_prompt);
+                                                    let mut chosen_dir = None;
+                                                    loop {
+                                                        if let Ok(Event::Key(dk)) = event::read() {
+                                                            if dk.code == KeyCode::Esc { break; }
+                                                            match dk.code {
+                                                                KeyCode::Char('8') | KeyCode::Up => { chosen_dir = Some((-1, 0)); break; }
+                                                                KeyCode::Char('2') | KeyCode::Down => { chosen_dir = Some((1, 0)); break; }
+                                                                KeyCode::Char('4') | KeyCode::Left => { chosen_dir = Some((0, -1)); break; }
+                                                                KeyCode::Char('6') | KeyCode::Right => { chosen_dir = Some((0, 1)); break; }
+                                                                KeyCode::Char('7') => { chosen_dir = Some((-1, -1)); break; }
+                                                                KeyCode::Char('9') => { chosen_dir = Some((-1, 1)); break; }
+                                                                KeyCode::Char('1') => { chosen_dir = Some((1, -1)); break; }
+                                                                KeyCode::Char('3') => { chosen_dir = Some((1, 1)); break; }
+                                                                _ => {}
                                                             }
                                                         }
-                                                        if let Some((dr, dc)) = chosen_dir {
-                                                            new_act = Some(UnitActivity::Dir(dr, dc));
-                                                            break;
-                                                        }
-                                                    } else {
-                                                        new_act = match choice {
-                                                            's' => Some(UnitActivity::Sentry),
-                                                            'y' => Some(UnitActivity::Attack),
-                                                            'g' => Some(UnitActivity::Explore),
-                                                            'w' => Some(UnitActivity::Idle),
-                                                            'f' => Some(UnitActivity::Fill),
-                                                            'l' => Some(UnitActivity::Land),
-                                                            'r' => Some(UnitActivity::Random),
-                                                            't' => Some(UnitActivity::TransportWait),
-                                                            'u' => Some(UnitActivity::Upgrade),
-                                                            _ => None,
-                                                        };
-                                                        if new_act.is_some() {
-                                                            break;
-                                                        }
+                                                    }
+                                                    if let Some((dr, dc)) = chosen_dir {
+                                                        new_act = Some(UnitActivity::Dir(dr, dc));
+                                                        break;
+                                                    }
+                                                } else {
+                                                    new_act = match choice {
+                                                        's' => Some(UnitActivity::Sentry),
+                                                        'y' => Some(UnitActivity::Attack),
+                                                        'g' => Some(UnitActivity::Explore),
+                                                        'w' => Some(UnitActivity::Idle),
+                                                        'f' => Some(UnitActivity::Fill),
+                                                        'l' => Some(UnitActivity::Land),
+                                                        'r' => Some(UnitActivity::Random),
+                                                        't' => Some(UnitActivity::TransportWait),
+                                                        'u' => Some(UnitActivity::Upgrade),
+                                                        _ => None,
+                                                    };
+                                                    if new_act.is_some() {
+                                                        break;
                                                     }
                                                 }
                                             }
                                         }
-                                        if let Some(act) = new_act {
+                                    }
+                                    if let Some(act) = new_act {
+                                        if let Some(c_idx) = c_idx_opt {
                                             if let Some(idx) = game.cities[c_idx].default_orders.iter().position(|(p, _)| *p == ptype) {
                                                 game.cities[c_idx].default_orders[idx].1 = act;
                                             } else {
                                                 game.cities[c_idx].default_orders.push((ptype, act));
                                             }
-                                            game.log(format!("City at ({},{}) order for {:?} set to {:?}.", game.cities[c_idx].loc.r, game.cities[c_idx].loc.c, ptype, act));
+                                            game.log(format!("City at ({},{}) local order for {:?} set to {:?}.", game.cities[c_idx].loc.r, game.cities[c_idx].loc.c, ptype, act));
+                                        } else {
+                                            if let Some(idx) = game.default_orders.iter().position(|(p, _)| *p == ptype) {
+                                                game.default_orders[idx].1 = act;
+                                            } else {
+                                                game.default_orders.push((ptype, act));
+                                            }
+                                            game.log(format!("GLOBAL default order for {:?} set to {:?}.", ptype, act));
                                         }
-                                    } else {
-                                        game.log(String::from("City order update cancelled."));
                                     }
                                 } else {
-                                    game.log(String::from("No player-owned city at cursor location."));
+                                    game.log(String::from("Order update cancelled."));
                                 }
                             }
                             KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
@@ -466,9 +484,14 @@ fn main() -> io::Result<()> {
                                 game.last_mouse_coord = None;
                             }
                             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                                let loc = game.cities.iter().find(|c| c.owner == Owner::Player).map(|c| c.loc).unwrap_or(Loc { r: game.rows / 2, c: game.cols / 2 });
+                                let mut current = game.viewport_center.unwrap_or(loc);
                                 if let Some((last_c, last_r)) = game.last_mouse_coord {
-                                    game.map_offset_c -= mouse.column as i32 - last_c as i32;
-                                    game.map_offset_r -= mouse.row as i32 - last_r as i32;
+                                    let dc = mouse.column as i32 - last_c as i32;
+                                    let dr = mouse.row as i32 - last_r as i32;
+                                    current.c = (current.c as i32 - dc).clamp(0, game.cols as i32 - 1) as usize;
+                                    current.r = (current.r as i32 - dr).clamp(0, game.rows as i32 - 1) as usize;
+                                    game.viewport_center = Some(current);
                                 }
                                 game.last_mouse_coord = Some((mouse.column, mouse.row));
                             }
@@ -476,8 +499,7 @@ fn main() -> io::Result<()> {
                         }
                     }
                     if let Event::Key(key) = ev {
-                        game.map_offset_r = 0;
-                        game.map_offset_c = 0;
+                        game.viewport_center = None;
                         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                             let mut stdout = io::stdout();
                             let _ = stdout.execute(DisableMouseCapture); // Turn mouse off
@@ -547,9 +569,13 @@ fn main() -> io::Result<()> {
                                 game.last_mouse_coord = None;
                             }
                             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                                let mut current = game.viewport_center.unwrap_or(loc);
                                 if let Some((last_c, last_r)) = game.last_mouse_coord {
-                                    game.map_offset_c -= mouse.column as i32 - last_c as i32;
-                                    game.map_offset_r -= mouse.row as i32 - last_r as i32;
+                                    let dc = mouse.column as i32 - last_c as i32;
+                                    let dr = mouse.row as i32 - last_r as i32;
+                                    current.c = (current.c as i32 - dc).clamp(0, game.cols as i32 - 1) as usize;
+                                    current.r = (current.r as i32 - dr).clamp(0, game.rows as i32 - 1) as usize;
+                                    game.viewport_center = Some(current);
                                 }
                                 game.last_mouse_coord = Some((mouse.column, mouse.row));
                             }
@@ -557,8 +583,7 @@ fn main() -> io::Result<()> {
                         }
                     }
                     if let Event::Key(key) = ev {
-                            game.map_offset_r = 0;
-                            game.map_offset_c = 0;
+                            game.viewport_center = None;
                             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                                 let mut stdout = io::stdout();
                                 let _ = stdout.execute(DisableMouseCapture); // Turn mouse off
@@ -867,9 +892,13 @@ fn main() -> io::Result<()> {
                         game.last_mouse_coord = None;
                     }
                     MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                        let mut current = game.viewport_center.unwrap_or_else(|| game.cities.iter().find(|c| c.owner == Owner::Player).map(|c| c.loc).unwrap_or(Loc { r: game.rows / 2, c: game.cols / 2 }));
                         if let Some((last_c, last_r)) = game.last_mouse_coord {
-                            game.map_offset_c -= mouse.column as i32 - last_c as i32;
-                            game.map_offset_r -= mouse.row as i32 - last_r as i32;
+                            let dc = mouse.column as i32 - last_c as i32;
+                            let dr = mouse.row as i32 - last_r as i32;
+                            current.c = (current.c as i32 - dc).clamp(0, game.cols as i32 - 1) as usize;
+                            current.r = (current.r as i32 - dr).clamp(0, game.rows as i32 - 1) as usize;
+                            game.viewport_center = Some(current);
                         }
                         game.last_mouse_coord = Some((mouse.column, mouse.row));
                     }
@@ -878,8 +907,7 @@ fn main() -> io::Result<()> {
             }
 
             if let Event::Key(key) = ev {
-                game.map_offset_r = 0;
-                game.map_offset_c = 0;
+                game.viewport_center = None;
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     let mut stdout = io::stdout();
                     let _ = stdout.execute(DisableMouseCapture);
