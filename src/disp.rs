@@ -1,4 +1,5 @@
-use crate::game::{Game, GameMode, Owner, PieceType, Loc};
+use crate::game::Game;
+use crate::models::{GameMode, Owner, PieceType, Loc};
 use std::collections::HashMap;
 use ratatui::{
     backend::CrosstermBackend,
@@ -27,16 +28,13 @@ pub fn refresh_display_with_input(game: &Game, prompt: &str) {
 }
 
 pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_blink: Option<(Loc, bool)>) {
-    let render_start = std::time::Instant::now();
     let terminal = get_terminal();
 
     terminal.draw(|f| {
         let size = f.size();
         
-        // Clear screen buffer to prevent background text bleed
         f.render_widget(Clear, size);
 
-        // Top-level vertical split: [Upper Section (Map + Sidebar), Messages, Prompt]
         let root_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -50,7 +48,6 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         let msg_area = root_chunks[1];
         let prompt_area = root_chunks[2];
 
-        // Horizontal split for upper section: [Map View, Right-hand Sidebar / Legend]
         let upper_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -62,7 +59,6 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         let map_area = upper_chunks[0];
         let sidebar_area = upper_chunks[1];
 
-        // Center camera on edit cursor, or active unit if blinking, otherwise player capital
         let center_loc = if let Some(vp) = game.viewport_center {
             vp
         } else if game.mode == GameMode::Edit || matches!(game.mode, GameMode::PickDest(_)) {
@@ -88,17 +84,15 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         let start_c = center_loc.c.saturating_sub(half_w).min(game.cols.saturating_sub(view_width));
         let end_c = (start_c + view_width).min(game.cols);
 
-        // Pre-compute visible pieces in viewport to eliminate O(V * P) loop
         let mut viewport_pieces = HashMap::new();
         for (i, p) in game.pieces.iter().enumerate() {
             if p.loc.r >= start_r && p.loc.r < end_r && p.loc.c >= start_c && p.loc.c < end_c {
                 if game.is_visible_to(i, Owner::Player) {
-                    viewport_pieces.entry(p.loc).or_insert(p); // Keeps the first piece found at loc
+                    viewport_pieces.entry(p.loc).or_insert(p); 
                 }
             }
         }
 
-        // Pre-compute cities in viewport
         let mut viewport_cities = HashMap::new();
         for city in game.cities.iter() {
             if city.loc.r >= start_r && city.loc.r < end_r && city.loc.c >= start_c && city.loc.c < end_c {
@@ -126,7 +120,6 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                 let is_blink_target = active_blink.map_or(false, |(b_loc, _)| b_loc == loc);
                 let is_blink_off = is_blink_target && !active_blink.unwrap().1;
 
-                // Check pieces
                 let piece_opt = viewport_pieces.get(&loc).copied();
                 if let Some(p) = piece_opt {
                     if !is_blink_off {
@@ -150,7 +143,6 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                     }
                 }
 
-                // Check cities
                 let city_opt = viewport_cities.get(&loc).copied();
                 if let Some(city) = city_opt {
                     if !(is_blink_off && piece_opt.is_none()) {
@@ -172,7 +164,6 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                     }
                 }
 
-                // Terrain
                 let terrain_ch = game.map[r][c];
                 let mut style = if terrain_ch == b'#' { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Blue) };
                 if is_blink_target { style = style.bg(Color::White).fg(Color::Black); }
@@ -191,7 +182,6 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
             .block(Block::default().borders(Borders::ALL).title(map_title));
         f.render_widget(map_widget, map_area);
 
-        // Right-hand Sidebar / Legend Widget
         let player_armies = game.pieces.iter().filter(|p| p.owner == Owner::Player && p.ptype == PieceType::Army).count();
         let player_cities = game.cities.iter().filter(|c| c.owner == Owner::Player).count();
         let enemy_cities = game.cities.iter().filter(|c| c.owner == Owner::Comp).count();
@@ -203,12 +193,10 @@ let mut sidebar_lines = vec![
             Line::from(""),
         ];
 
-        // NEW: Dynamic Cursor Info Panel for Edit Mode
         if game.mode == GameMode::Edit {
             sidebar_lines.push(Line::from(Span::styled("--- CURSOR INFO ---", Style::default().fg(Color::Magenta))));
             let loc = game.edit_cursor;
             
-            // Only reveal details if the tile is explored (no cheating!)
             if game.player_map[loc.r][loc.c] == 1 {
                 let terrain = if game.map[loc.r][loc.c] == b'#' { "Land" } else { "Sea" };
                 sidebar_lines.push(Line::from(format!(" Terrain: {}", terrain)));
@@ -241,19 +229,18 @@ let mut sidebar_lines = vec![
 
                 if !visible_pieces.is_empty() {
                     sidebar_lines.push(Line::from(format!(" Units Here: {}", visible_pieces.len())));
-                    for p in visible_pieces.iter().take(4) {
-                        let owner_str = match p.owner { Owner::Player => "My", Owner::Comp => "Enemy", Owner::Neutral => "Neut" };
-                        let mut extra = String::new();
-                        if p.owner == Owner::Player {
-                            extra = format!(" ({}/{}) {:?}", p.hits, p.ptype.max_hits(), p.activity);
-                            if p.ptype == PieceType::Transport || p.ptype == PieceType::Carrier {
-                                extra.push_str(&format!(" [Cargo: {}]", p.cargo.len()));
-                            }
-                        }
-                        sidebar_lines.push(Line::from(format!(" - {} {:?}{}", owner_str, p.ptype, extra)));
+                    
+                    // Group units by Owner, Type, and Activity for clean UI stacking
+                    use std::collections::BTreeMap;
+                    let mut unit_groups = BTreeMap::new();
+                    for p in &visible_pieces {
+                        let key = (p.owner, p.ptype, p.activity);
+                        *unit_groups.entry(key).or_insert(0) += 1;
                     }
-                    if visible_pieces.len() > 4 {
-                        sidebar_lines.push(Line::from("   ...and more"));
+                    
+                    for ((owner, ptype, activity), count) in unit_groups {
+                        let owner_str = match owner { Owner::Player => "My", Owner::Comp => "Enemy", Owner::Neutral => "Neut" };
+                        sidebar_lines.push(Line::from(format!(" - {}x {} {:?} {:?}", count, owner_str, ptype, activity)));
                     }
                 }
             } else {
@@ -293,15 +280,12 @@ let mut sidebar_lines = vec![
             .block(Block::default().borders(Borders::ALL).title(" Info "));
         f.render_widget(sidebar_widget, sidebar_area);
 
-        // Message Log Widget
         let total_msgs = game.messages.len();
-        let display_count = 5; // Your UI box holds exactly 5 lines inside its borders
+        let display_count = 5; 
         
-        // Calculate the maximum possible scroll so you can't scroll past the oldest message
         let max_scroll = total_msgs.saturating_sub(display_count);
         let safe_scroll = game.msg_scroll.min(max_scroll);
         
-        // Slice the vector to only show the lines we scrolled to
         let start_idx = total_msgs.saturating_sub(display_count).saturating_sub(safe_scroll);
         let end_idx = (start_idx + display_count).min(total_msgs);
         
@@ -313,18 +297,18 @@ let mut sidebar_lines = vec![
         let msg_widget = Paragraph::new(msg_lines)
             .block(Block::default().borders(Borders::ALL).title(msg_title));
         f.render_widget(msg_widget, msg_area);
-        // Prompt Widget
         let prompt_widget = Paragraph::new(prompt)
             .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
         f.render_widget(prompt_widget, prompt_area);
     }).unwrap();
 
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("empire_debug.log")
-    {
-        use std::io::Write;
-        let _ = writeln!(file, "frame_draw_us: {}", render_start.elapsed().as_micros());
-    }
+    #[cfg(debug_assertions)]
+        {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open("ai_metrics.csv") {
+                let comp_cities = game.cities.iter().filter(|c| c.owner == Owner::Comp).count();
+                let comp_units = game.pieces.iter().filter(|p| p.owner == Owner::Comp && p.hits > 0).count();
+                let _ = writeln!(file, "{},{},{}", game.turn, comp_cities, comp_units);
+            }
+        }
 }
