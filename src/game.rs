@@ -366,7 +366,46 @@ impl Game {
         }
 
         self.log(format!("Classic VMS-Empire map generated. Difficulty set to {}.", self.difficulty));
-        self.log(String::from("Game initialized. 70 cities scattered across the world."));
+        self.log(format!("Game initialized. {} cities scattered across the world.", self.cities.len()));
+    }
+
+    /// Chooses which enemy piece on a tile defends against `attacker`.
+    ///
+    /// Air fights air and ground fights ground: a fighter must beat the enemy fighter on the
+    /// tile before it can fight the unit underneath, and every other attacker must beat the
+    /// surface unit before it can fight an enemy fighter flying over it. Only when nothing
+    /// on the attacker's plane is left does the other plane defend. Within a plane (a
+    /// city can hold several units) the highest piece type in the original game's ordering
+    /// defends, first listed winning ties, as in VMS-Empire's `find_obj_at_loc`.
+    fn pick_defender(&self, candidates: &[usize], attacker: PieceType) -> Option<usize> {
+        // Order of the piece types in the original game (empire.h).
+        fn original_rank(p: PieceType) -> u8 {
+            match p {
+                PieceType::Army => 0,
+                PieceType::Fighter => 1,
+                PieceType::PatrolBoat => 2,
+                PieceType::Destroyer => 3,
+                PieceType::Submarine => 4,
+                PieceType::Transport => 5,
+                PieceType::Carrier => 6,
+                PieceType::Battleship => 7,
+                PieceType::Satellite => 8,
+            }
+        }
+        let best = |same_plane_only: bool| -> Option<usize> {
+            let mut best: Option<usize> = None;
+            for &i in candidates {
+                let ptype = self.pieces[i].ptype;
+                if same_plane_only && (ptype == PieceType::Fighter) != (attacker == PieceType::Fighter) {
+                    continue;
+                }
+                if best.map_or(true, |b| original_rank(ptype) > original_rank(self.pieces[b].ptype)) {
+                    best = Some(i);
+                }
+            }
+            best
+        };
+        best(true).or_else(|| best(false))
     }
 
     pub fn attempt_move(&mut self, piece_idx: usize, target_loc: Loc) -> (MoveResult, String) {
@@ -391,7 +430,7 @@ impl Game {
             return (MoveResult::InvalidMove, if is_player { String::from("Terrain impassable for this unit type.") } else { String::new() });
         }
 
-        let mut enemy_idx = None;
+        let mut enemy_candidates: Vec<usize> = Vec::new();
         let mut boardable_carrier_idx = None;
         let mut blocked_by_friend = false;
 
@@ -411,11 +450,13 @@ impl Game {
                             blocked_by_friend = true;
                         }
                     } else {
-                        enemy_idx = Some(i);
+                        enemy_candidates.push(i);
                     }
                 }
             }
         }
+
+        let enemy_idx = self.pick_defender(&enemy_candidates, ptype);
 
         // Always prioritize boarding if an available transport exists, overriding deck collision
         if let Some(carrier_idx) = boardable_carrier_idx {
@@ -442,9 +483,14 @@ impl Game {
             let p_damage = self.pieces[piece_idx].ptype.strike_damage();
             let e_damage = e_type.strike_damage();
             
+            // Same model as the original game: each round exactly one side lands a blow,
+            // 50/50. (Letting both sides roll every round favoured whoever rolled first.)
             while self.pieces[piece_idx].hits > 0 && self.pieces[e_idx].hits > 0 {
-                if rng.gen_bool(0.5) { self.pieces[e_idx].hits -= p_damage; }
-                if self.pieces[e_idx].hits > 0 && rng.gen_bool(0.5) { self.pieces[piece_idx].hits -= e_damage; }
+                if rng.gen_bool(0.5) {
+                    self.pieces[e_idx].hits -= p_damage;
+                } else {
+                    self.pieces[piece_idx].hits -= e_damage;
+                }
             }
 
             let attacked_player = self.pieces[e_idx].owner == Owner::Player;
@@ -464,7 +510,13 @@ impl Game {
                           else { String::new() };
                 return (MoveResult::CombatLost, msg);
             } else {
-                if !is_bombardment {
+                // If another enemy still holds the sector (an air unit over a ground unit, or the
+                // reverse), the winner stays put: it must beat the rest of the stack before it
+                // can occupy the tile or take a city there.
+                let others_remain = enemy_candidates.iter().any(|&i| i != e_idx && self.pieces[i].hits > 0);
+                let advance = !is_bombardment && !others_remain;
+
+                if advance {
                     let old_loc = self.pieces[piece_idx].loc;
                     self.pieces[piece_idx].loc = target_loc;
                     
@@ -493,7 +545,7 @@ impl Game {
                     self.reveal_vision(target_loc, ptype.sight_range());
                 }
 
-                if ptype == PieceType::Army {
+                if ptype == PieceType::Army && advance {
                     for (c_idx, city) in self.cities.iter_mut().enumerate() {
                         if city.loc == target_loc && city.owner != unit_owner {
                             city.owner = unit_owner;
@@ -513,10 +565,15 @@ impl Game {
                               else if attacked_player { format!(">>> ALERT! Your {:?} was DESTROYED by enemy {:?}! <<<", e_type, ptype) }
                               else { String::new() };
 
+                if others_remain && is_player {
+                    win_msg = format!("{} Another enemy unit still holds the sector.", win_msg);
+                }
+
                 if ptype == PieceType::Fighter {
                     self.pieces[piece_idx].fuel -= 1;
-                    let at_base = self.cities.iter().any(|c| c.loc == target_loc && c.owner == unit_owner);
-                    let at_carrier = self.pieces.iter().any(|p| p.loc == target_loc && p.owner == unit_owner && p.ptype == PieceType::Carrier && p.hits > 0);
+                    let end_loc = self.pieces[piece_idx].loc;
+                    let at_base = self.cities.iter().any(|c| c.loc == end_loc && c.owner == unit_owner);
+                    let at_carrier = self.pieces.iter().any(|p| p.loc == end_loc && p.owner == unit_owner && p.ptype == PieceType::Carrier && p.hits > 0);
 
                     if at_base || at_carrier {
                         self.pieces[piece_idx].fuel = 32;
@@ -921,8 +978,15 @@ impl Game {
                 if let Some(step) = chosen_step {
                     visited.push(step);
                     let old_loc = self.pieces[idx].loc;
+                    let moves_before = self.pieces[idx].moves_left;
                     let _ = self.attempt_move(idx, step);
                     if self.pieces[idx].hits == 0 { break; }
+                    if self.pieces[idx].loc == old_loc && self.pieces[idx].moves_left < moves_before {
+                        // Won a fight but another enemy still holds that tile: stay put and
+                        // let the next iteration take on the rest of the stack.
+                        visited.pop();
+                        continue;
+                    }
                     if self.pieces[idx].loc == old_loc { 
                         // Unit failed to move (bounced off a blocker or invalid state), consume moves to prevent infinite loops
                         self.pieces[idx].moves_left = 0;
@@ -1841,10 +1905,24 @@ impl Game {
         None
     }
 
-    pub fn save_game(&self, filename: &str) {
-        if let Ok(data) = serde_json::to_string(self) {
-            let _ = std::fs::write(filename, data);
+    /// Writes the game to `filename`, reporting any failure to the caller.
+    ///
+    /// The data goes to `<filename>.tmp` first and is renamed into place, so a crash or a full
+    /// disk part-way through never destroys an existing good save.
+    pub fn save_game(&self, filename: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let data = serde_json::to_string(self).map_err(std::io::Error::other)?;
+        let tmp = format!("{}.tmp", filename);
+        let result = (|| {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(data.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, filename)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
+        result
     }
 
     pub fn load_game(filename: &str) -> Option<Self> {

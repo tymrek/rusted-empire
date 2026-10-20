@@ -90,8 +90,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Number of AI-vs-AI games the `--headless` playtest rig plays.
+const PLAYTEST_GAMES: usize = 100;
+
 fn run_headless_rig() {
-    println!("Starting headless playtest rig for 1000 games across CPU threads...");
+    println!("Starting headless playtest rig for {} games across CPU threads...", PLAYTEST_GAMES);
     let p_wins = Arc::new(AtomicUsize::new(0));
     let c_wins = Arc::new(AtomicUsize::new(0));
     let draws = Arc::new(AtomicUsize::new(0));
@@ -122,7 +125,7 @@ fn run_headless_rig() {
         handles.push(thread::spawn(move || {
             loop {
                 let i = current_game.fetch_add(1, Ordering::Relaxed);
-                if i > 100 {
+                if i > PLAYTEST_GAMES {
                     thread_starts[thread_id].store(0, Ordering::Relaxed);
                     break;
                 }
@@ -193,9 +196,9 @@ fn run_headless_rig() {
                 let mut stdout = io::stdout();
                 let _ = write!(stdout, "\x1B[2K\r");
                 if is_draw {
-                    let _ = writeln!(stdout, "Game {}/100 finished in a Draw (Turn limit). [{:.2}s]", i, elapsed_sec);
+                    let _ = writeln!(stdout, "Game {}/{} finished in a Draw (Turn limit). [{:.2}s]", i, PLAYTEST_GAMES, elapsed_sec);
                 } else {
-                    let _ = writeln!(stdout, "Game {}/100 finished in {} turns. Winner: {} [{:.2}s]", i, game.turn, winner, elapsed_sec);
+                    let _ = writeln!(stdout, "Game {}/{} finished in {} turns. Winner: {} [{:.2}s]", i, PLAYTEST_GAMES, game.turn, winner, elapsed_sec);
                 }
                 
                 completed_games.fetch_add(1, Ordering::Relaxed);
@@ -206,7 +209,7 @@ fn run_headless_rig() {
     let mut stdout = io::stdout();
     loop {
         let done = completed_games.load(Ordering::Relaxed);
-        if done >= 100 {
+        if done >= PLAYTEST_GAMES {
             break;
         }
 
@@ -408,8 +411,10 @@ fn main() -> io::Result<()> {
     loop {
         // Handle Configurable Autosave check at turn boundary
         if autosave_interval > 0 && game.turn > 0 && game.turn % autosave_interval == 0 && game.turn != last_autosaved_turn {
-            game.save_game("empire_auto.sav");
-            game.log(format!("Autosaved game at turn {}.", game.turn));
+            match game.save_game("empire_auto.sav") {
+                Ok(()) => game.log(format!("Autosaved game at turn {}.", game.turn)),
+                Err(e) => game.log(format!("AUTOSAVE FAILED at turn {}: {}", game.turn, e)),
+            }
             last_autosaved_turn = game.turn;
         }
 
@@ -1600,8 +1605,10 @@ fn main() -> io::Result<()> {
                             }
                         }
                         's' => {
-                            game.save_game("empire.sav");
-                            game.log(String::from("Game saved to empire.sav."));
+                            match game.save_game("empire.sav") {
+                                Ok(()) => game.log(String::from("Game saved to empire.sav.")),
+                                Err(e) => game.log(format!("SAVE FAILED: could not write empire.sav: {}", e)),
+                            }
                         }
                         'l' => {
                             if let Some(loaded_game) = Game::load_game("empire.sav") {
