@@ -896,4 +896,146 @@ mod tests {
         let second_id = game.pieces.last().unwrap().id;
         assert!(second_id > first_id, "id {} was reused", second_id);
     }
+
+    #[test]
+    fn test_init_message_reports_actual_city_count() {
+        let mut game = Game::new(30, 30, 50);
+        game.setup_initial_states();
+        let expected = format!("{} cities scattered", game.cities.len());
+        assert!(
+            game.messages.iter().any(|m| m.contains(&expected)),
+            "init log should mention the real city count ({}); got {:?}",
+            game.cities.len(),
+            game.messages
+        );
+    }
+
+    // ---- combat model and stacked defenders ----
+
+    /// 10x10 map: land on row 5 columns 4..=7, water elsewhere.
+    fn combat_world() -> Game {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        for c in 4..=7 {
+            game.map[5][c] = b'#';
+        }
+        game
+    }
+
+    #[test]
+    fn test_combat_is_fifty_fifty_per_round_like_the_original() {
+        // 1-hit army vs 1-hit army: exactly one blow decides it, so ~50% each way.
+        // (The old "both sides roll each round" model gave the attacker about 2/3.)
+        let trials = 20_000;
+        let mut attacker_wins = 0;
+        for _ in 0..trials {
+            let mut game = combat_world();
+            game.pieces.push(test_piece(1, PieceType::Army, Owner::Player, 5, 5));
+            game.pieces.push(test_piece(2, PieceType::Army, Owner::Comp, 5, 6));
+            if game.attempt_move(0, Loc { r: 5, c: 6 }).0 == MoveResult::CombatWon {
+                attacker_wins += 1;
+            }
+        }
+        let rate = attacker_wins as f64 / trials as f64;
+        assert!((0.48..=0.52).contains(&rate), "attacker win rate {}", rate);
+    }
+
+    #[test]
+    fn test_ground_attacker_fights_ground_unit_before_flyover_fighter() {
+        let mut game = combat_world();
+        let mut attacker = test_piece(1, PieceType::Army, Owner::Player, 5, 5);
+        attacker.hits = 1000; // cannot realistically lose
+        attacker.moves_left = 2;
+        game.pieces.push(attacker);
+        game.pieces.push(test_piece(2, PieceType::Fighter, Owner::Comp, 5, 6)); // listed first...
+        game.pieces.push(test_piece(3, PieceType::Army, Owner::Comp, 5, 6)); // ...army must still defend
+
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatWon);
+        assert!(game.pieces[2].hits <= 0, "enemy army should have defended and died");
+        assert!(game.pieces[1].hits > 0, "enemy fighter should be untouched");
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 5 }, "attacker must not occupy a sector that is still held");
+
+        // Second attack takes on the fighter and now the attacker advances.
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatWon);
+        assert!(game.pieces[1].hits <= 0);
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 6 });
+    }
+
+    #[test]
+    fn test_fighter_attacker_fights_enemy_fighter_before_ground_unit() {
+        let mut game = combat_world();
+        let mut attacker = test_piece(1, PieceType::Fighter, Owner::Player, 5, 5);
+        attacker.hits = 1000;
+        attacker.moves_left = 2;
+        game.pieces.push(attacker);
+        game.pieces.push(test_piece(2, PieceType::Army, Owner::Comp, 5, 6)); // listed first...
+        game.pieces.push(test_piece(3, PieceType::Fighter, Owner::Comp, 5, 6)); // ...fighter must defend
+
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatWon);
+        assert!(game.pieces[2].hits <= 0, "enemy fighter should have defended and died");
+        assert!(game.pieces[1].hits > 0, "enemy army should be untouched");
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 5 });
+    }
+
+    #[test]
+    fn test_same_plane_defender_prefers_highest_original_type() {
+        // Two enemy surface units in one tile (as in a city): the destroyer outranks the patrol boat.
+        let mut game = combat_world();
+        game.map[5][6] = b'.';
+        let mut attacker = test_piece(1, PieceType::Battleship, Owner::Player, 5, 5);
+        attacker.hits = 1000;
+        game.map[5][5] = b'.';
+        game.pieces.push(attacker);
+        game.pieces.push(test_piece(2, PieceType::Destroyer, Owner::Comp, 5, 6)); // listed first...
+        game.pieces.push(test_piece(3, PieceType::PatrolBoat, Owner::Comp, 5, 6));
+        game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert!(game.pieces[1].hits <= 0, "destroyer outranks patrol boat and should defend");
+        assert!(game.pieces[2].hits > 0);
+    }
+
+    // ---- saving ----
+
+    fn scratch_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("rs_empire_test_{}_{}", std::process::id(), name))
+    }
+
+    #[test]
+    fn test_save_and_load_round_trip() {
+        let path = scratch_path("roundtrip.sav");
+        let mut game = Game::new(10, 10, 50);
+        game.turn = 42;
+        game.pieces.push(test_piece(7, PieceType::Army, Owner::Player, 1, 1));
+        game.save_game(path.to_str().unwrap()).expect("save should succeed");
+        let loaded = Game::load_game(path.to_str().unwrap()).expect("load should succeed");
+        assert_eq!(loaded.turn, 42);
+        assert_eq!(loaded.pieces.len(), 1);
+        assert!(!std::path::Path::new(&format!("{}.tmp", path.display())).exists(), "temp file must not linger");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_save_failure_is_reported() {
+        let game = Game::new(10, 10, 50);
+        let path = scratch_path("no_such_dir").join("empire.sav");
+        assert!(game.save_game(path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_failed_save_leaves_existing_save_intact() {
+        let path = scratch_path("keep.sav");
+        std::fs::write(&path, "PREVIOUS GOOD SAVE").unwrap();
+        // Make the temp file impossible to create by putting a directory in its place.
+        let tmp = format!("{}.tmp", path.display());
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let game = Game::new(10, 10, 50);
+        assert!(game.save_game(path.to_str().unwrap()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "PREVIOUS GOOD SAVE");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_file(&path);
+    }
 }
