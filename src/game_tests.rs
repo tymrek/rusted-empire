@@ -819,4 +819,81 @@ mod tests {
             panic!("Fighter activity should be Dest(base)");
         }
     }
+
+    fn test_piece(id: usize, ptype: PieceType, owner: Owner, r: usize, c: usize) -> Piece {
+        Piece {
+            id,
+            ptype,
+            owner,
+            loc: Loc { r, c },
+            hits: ptype.max_hits(),
+            moves_left: ptype.max_moves(),
+            activity: UnitActivity::Idle,
+            cargo: Vec::new(),
+            fuel: 32,
+        }
+    }
+
+    #[test]
+    fn test_turn_refreshes_full_moves() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        let mut fighter = test_piece(1, PieceType::Fighter, Owner::Player, 5, 5);
+        fighter.moves_left = 5; // spent 3 of 8 last turn
+        let mut idle_army = test_piece(2, PieceType::Army, Owner::Player, 1, 1);
+        idle_army.moves_left = 0;
+        game.pieces.push(fighter);
+        game.pieces.push(idle_army);
+
+        game.process_turn();
+
+        assert_eq!(game.pieces[0].moves_left, PieceType::Fighter.max_moves());
+        assert_eq!(game.pieces[1].moves_left, PieceType::Army.max_moves());
+    }
+
+    #[test]
+    fn test_new_piece_ids_skip_cargo_ids() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        game.map[2][2] = b'#';
+        let mut transport = test_piece(1, PieceType::Transport, Owner::Player, 5, 5);
+        transport.cargo.push(test_piece(2, PieceType::Army, Owner::Player, 5, 5));
+        game.pieces.push(transport);
+        game.cities.push(City {
+            loc: Loc { r: 2, c: 2 },
+            owner: Owner::Player,
+            prod: PieceType::Army,
+            work: PieceType::Army.build_cost() - 1,
+            default_orders: Vec::new(),
+        });
+
+        game.process_turn(); // city completes an Army
+        game.wake_cargo(0); // cargo army comes back onto the deck
+
+        let mut ids: Vec<usize> = game.pieces.iter().map(|p| p.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), game.pieces.len(), "duplicate piece ids: {:?}", game.pieces.iter().map(|p| p.id).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_piece_ids_not_reused_after_death() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        game.map[2][2] = b'#';
+        game.cities.push(City {
+            loc: Loc { r: 2, c: 2 },
+            owner: Owner::Player,
+            prod: PieceType::Army,
+            work: PieceType::Army.build_cost() - 1,
+            default_orders: Vec::new(),
+        });
+        game.process_turn();
+        let first_id = game.pieces.last().unwrap().id;
+        game.pieces.retain(|p| p.id != first_id); // that piece dies
+        game.cities[0].work = PieceType::Army.build_cost() - 1;
+        game.process_turn();
+        let second_id = game.pieces.last().unwrap().id;
+        assert!(second_id > first_id, "id {} was reused", second_id);
+    }
 }
