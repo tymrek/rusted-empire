@@ -14,6 +14,22 @@ use crossterm::{
 use std::io::{self, Write};
 use std::time::{Instant, Duration};
 
+fn prompt_quit_confirmation(game: &Game) -> bool {
+    let prompt = "Really quit game? [Y/N]: ";
+    disp::refresh_display_with_input(game, prompt);
+    loop {
+        if let Ok(Event::Key(k)) = event::read() {
+            if let KeyCode::Char(c) = k.code {
+                match c.to_ascii_lowercase() {
+                    'y' => return true,
+                    'n' => return false,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 fn prompt_city_production(game: &mut Game, city_idx: usize) {
     game.viewport_center = None;
     let city_loc = game.cities[city_idx].loc;
@@ -69,9 +85,10 @@ fn prompt_city_production(game: &mut Game, city_idx: usize) {
     }
 }
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn run_headless_rig() {
     println!("Starting headless playtest rig for 1000 games across CPU threads...");
@@ -79,38 +96,47 @@ fn run_headless_rig() {
     let c_wins = Arc::new(AtomicUsize::new(0));
     let draws = Arc::new(AtomicUsize::new(0));
     let current_game = Arc::new(AtomicUsize::new(1));
+    let completed_games = Arc::new(AtomicUsize::new(0));
 
     let file = std::fs::File::create("playtest_metrics.csv").expect("Failed to create metrics file");
     let file_mutex = Arc::new(Mutex::new(file));
     
     {
         let mut f = file_mutex.lock().unwrap();
-        let _ = writeln!(f, "Game,Winner,Turns");
+        let _ = writeln!(f, "Game,Winner,Turns,ElapsedSec");
     }
 
-    let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(12);
+    let num_threads = std::thread::available_parallelism().map(|n| (n.get() / 2).clamp(1, 4)).unwrap_or(4);
+    let thread_starts = Arc::new((0..num_threads).map(|_| AtomicU64::new(0)).collect::<Vec<_>>());
     let mut handles = vec![];
 
-    for _ in 0..num_threads {
+    for thread_id in 0..num_threads {
         let p_wins = Arc::clone(&p_wins);
         let c_wins = Arc::clone(&c_wins);
         let draws = Arc::clone(&draws);
         let current_game = Arc::clone(&current_game);
+        let completed_games = Arc::clone(&completed_games);
         let file_mutex = Arc::clone(&file_mutex);
+        let thread_starts = Arc::clone(&thread_starts);
 
         handles.push(thread::spawn(move || {
             loop {
                 let i = current_game.fetch_add(1, Ordering::Relaxed);
-                if i > 1000 {
+                if i > 100 {
+                    thread_starts[thread_id].store(0, Ordering::Relaxed);
                     break;
                 }
+
+                let start_sys = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                thread_starts[thread_id].store(start_sys, Ordering::Relaxed);
+                let start_inst = Instant::now();
 
                 let mut game;
                 loop {
                     game = Game::new(30, 30, 12);
                     game.setup_initial_states();
                     
-                    if game.pieces.iter().any(|p| p.owner == Owner::Player) {
+                    if game.cities.iter().any(|c| c.owner == Owner::Player) {
                         break;
                     }
                 }
@@ -121,7 +147,9 @@ fn run_headless_rig() {
                     game.default_orders.push((ptype, UnitActivity::Attack));
                 }
                 
-                loop {
+                let mut is_draw = false;
+
+                let winner = loop {
                     for p in game.pieces.iter_mut() {
                         if p.owner == Owner::Player && p.activity == UnitActivity::Idle {
                             p.activity = UnitActivity::Attack;
@@ -131,36 +159,80 @@ fn run_headless_rig() {
                     game.process_turn();
 
                     if let Some(msg) = game.check_game_over() {
-                        let winner = if msg.contains("VICTORY") || msg.contains("TOTAL DOMINATION") {
+                        break if msg.contains("VICTORY") || msg.contains("TOTAL DOMINATION") {
                             p_wins.fetch_add(1, Ordering::Relaxed);
                             "Player"
                         } else {
                             c_wins.fetch_add(1, Ordering::Relaxed);
                             "Comp"
                         };
-                        
-                        let mut f = file_mutex.lock().unwrap();
-                        let _ = writeln!(f, "{},{},{}", i, winner, game.turn);
-                        println!("Game {}/1000 finished in {} turns. Winner: {}", i, game.turn, winner);
-                        break;
                     }
 
                     if game.turn > 3000 {
-                        draws.fetch_add(1, Ordering::Relaxed);
-                        let mut f = file_mutex.lock().unwrap();
-                        let _ = writeln!(f, "{},Draw,3000", i);
-                        println!("Game {}/1000 finished in a Draw (Turn limit).", i);
-                        break;
+                        if game.player_score > game.comp_score {
+                            p_wins.fetch_add(1, Ordering::Relaxed);
+                            break "Player (Score)";
+                        } else if game.comp_score > game.player_score {
+                            c_wins.fetch_add(1, Ordering::Relaxed);
+                            break "Comp (Score)";
+                        } else {
+                            draws.fetch_add(1, Ordering::Relaxed);
+                            is_draw = true;
+                            break "Draw";
+                        }
                     }
+                };
+
+                let elapsed_sec = start_inst.elapsed().as_secs_f32();
+
+                {
+                    let mut f = file_mutex.lock().unwrap();
+                    let _ = writeln!(f, "{},{},{},{:.2}", i, winner, game.turn, elapsed_sec);
                 }
+
+                let mut stdout = io::stdout();
+                let _ = write!(stdout, "\x1B[2K\r");
+                if is_draw {
+                    let _ = writeln!(stdout, "Game {}/100 finished in a Draw (Turn limit). [{:.2}s]", i, elapsed_sec);
+                } else {
+                    let _ = writeln!(stdout, "Game {}/100 finished in {} turns. Winner: {} [{:.2}s]", i, game.turn, winner, elapsed_sec);
+                }
+                
+                completed_games.fetch_add(1, Ordering::Relaxed);
             }
         }));
+    }
+
+    let mut stdout = io::stdout();
+    loop {
+        let done = completed_games.load(Ordering::Relaxed);
+        if done >= 100 {
+            break;
+        }
+
+        let now_sys = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let mut status_line = String::new();
+        
+        for (id, start_time) in thread_starts.iter().enumerate() {
+            let st = start_time.load(Ordering::Relaxed);
+            if st > 0 && now_sys >= st {
+                let elapsed = (now_sys - st) as f32 / 1000.0;
+                status_line.push_str(&format!("[T{}: {:.1}s] ", id, elapsed));
+            } else {
+                status_line.push_str(&format!("[T{}: IDLE] ", id));
+            }
+        }
+
+        let _ = write!(stdout, "\x1B[2K\r{}", status_line);
+        let _ = stdout.flush();
+        thread::sleep(Duration::from_millis(100));
     }
 
     for handle in handles {
         let _ = handle.join();
     }
 
+    let _ = write!(io::stdout(), "\x1B[2K\r");
     println!("Rig complete. Player Wins: {} | Comp Wins: {} | Draws: {}", 
         p_wins.load(Ordering::Relaxed), 
         c_wins.load(Ordering::Relaxed), 
@@ -169,9 +241,17 @@ fn run_headless_rig() {
 }
 
 fn main() -> io::Result<()> {
-    if std::env::args().any(|arg| arg == "--headless") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--headless") {
         run_headless_rig();
         return Ok(());
+    }
+
+    let mut load_file = None;
+    if let Some(idx) = args.iter().position(|arg| arg == "--load" || arg == "-l") {
+        if idx + 1 < args.len() {
+            load_file = Some(args[idx + 1].clone());
+        }
     }
 
     let original_hook = std::panic::take_hook();
@@ -191,17 +271,81 @@ fn main() -> io::Result<()> {
     stdout.execute(cursor::Hide)?;
     stdout.execute(terminal::Clear(ClearType::All))?;
 
+    let mut preloaded_game = None;
+    if let Some(filename) = load_file {
+        if let Some(loaded_game) = Game::load_game(&filename) {
+            preloaded_game = Some(loaded_game);
+        } else {
+            let _ = stdout.execute(DisableMouseCapture);
+            let _ = terminal::disable_raw_mode();
+            let _ = stdout.execute(terminal::LeaveAlternateScreen);
+            let _ = stdout.execute(cursor::Show);
+            eprintln!("Failed to load save file: {}", filename);
+            return Ok(());
+        }
+    }
+
+    let difficulty: u32 = if preloaded_game.is_none() {
+        stdout.execute(cursor::MoveTo(10, 5))?;
+        print!("==================================================");
+        stdout.execute(cursor::MoveTo(10, 6))?;
+        print!(" Welcome to rs empire (Rust Port of VMS-empire)                 ");
+        stdout.execute(cursor::MoveTo(10, 7))?;
+        print!("==================================================");
+        stdout.execute(cursor::MoveTo(10, 9))?;
+        print!("Enter difficulty level (1 - 100): ");
+        stdout.flush()?;
+
+        let mut difficulty_input = String::new();
+        stdout.execute(cursor::Show)?;
+        loop {
+            if let Event::Key(key) = event::read()? {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    let _ = stdout.execute(cursor::Show);
+                    let _ = terminal::disable_raw_mode();
+                    let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                    std::process::exit(0);
+                }
+
+                match key.code {
+                    KeyCode::Char(c) => {
+                        if c.is_ascii_digit() {
+                            difficulty_input.push(c);
+                            print!("{}", c);
+                            stdout.flush()?;
+                        }
+                    }
+                    KeyCode::Enter => break,
+                    KeyCode::Backspace => {
+                        if !difficulty_input.is_empty() {
+                            difficulty_input.pop();
+                            print!("\x08 \x08");
+                            stdout.flush()?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        stdout.execute(cursor::Hide)?;
+        difficulty_input.trim().parse().unwrap_or(50).clamp(1, 100)
+    } else {
+        50
+    };
+
+    // Prompt for Autosave Frequency
+    stdout.execute(terminal::Clear(ClearType::All))?;
     stdout.execute(cursor::MoveTo(10, 5))?;
     print!("==================================================");
     stdout.execute(cursor::MoveTo(10, 6))?;
-    print!(" Welcome to rs empire (Rust Port of VMS-empire)                 ");
+    print!(" Autosave Configuration                                         ");
     stdout.execute(cursor::MoveTo(10, 7))?;
     print!("==================================================");
     stdout.execute(cursor::MoveTo(10, 9))?;
-    print!("Enter difficulty level (1 - 100): ");
+    print!("Enter autosave interval in turns (0 = Disabled): ");
     stdout.flush()?;
 
-    let mut difficulty_input = String::new();
+    let mut autosave_input = String::new();
     stdout.execute(cursor::Show)?;
     loop {
         if let Event::Key(key) = event::read()? {
@@ -215,15 +359,15 @@ fn main() -> io::Result<()> {
             match key.code {
                 KeyCode::Char(c) => {
                     if c.is_ascii_digit() {
-                        difficulty_input.push(c);
+                        autosave_input.push(c);
                         print!("{}", c);
                         stdout.flush()?;
                     }
                 }
                 KeyCode::Enter => break,
                 KeyCode::Backspace => {
-                    if !difficulty_input.is_empty() {
-                        difficulty_input.pop();
+                    if !autosave_input.is_empty() {
+                        autosave_input.pop();
                         print!("\x08 \x08");
                         stdout.flush()?;
                     }
@@ -234,25 +378,41 @@ fn main() -> io::Result<()> {
     }
     stdout.execute(cursor::Hide)?;
 
-    let difficulty: u32 = difficulty_input.trim().parse().unwrap_or(50).clamp(1, 100);
+    let autosave_interval: i32 = autosave_input.trim().parse().unwrap_or(0);
 
     stdout.execute(terminal::Clear(ClearType::All))?;
-    let mut game = Game::new(60, 100, difficulty);
-    game.setup_initial_states();
 
-    let starting_player_cities: Vec<usize> = game.cities.iter().enumerate()
-        .filter(|(_, ct)| ct.owner == Owner::Player)
-        .map(|(i, _)| i)
-        .collect();
+    let mut game = if let Some(mut loaded_game) = preloaded_game {
+        loaded_game.log(String::from("Game loaded from command line."));
+        loaded_game
+    } else {
+        let mut g = Game::new(60, 100, difficulty);
+        g.setup_initial_states();
 
-    for idx in starting_player_cities {
-        prompt_city_production(&mut game, idx);
-    }
+        let starting_player_cities: Vec<usize> = g.cities.iter().enumerate()
+            .filter(|(_, ct)| ct.owner == Owner::Player)
+            .map(|(i, _)| i)
+            .collect();
 
+        for idx in starting_player_cities {
+            prompt_city_production(&mut g, idx);
+        }
+        g
+    };
+
+    let mut last_autosaved_turn = 0;
     let action_prompt = "[N]ext, [A]utomove, [M]anual, [S]ave, [L]oad, [Q]uit: ";
     disp::refresh_display_with_input(&game, action_prompt);
+    let mut observer_mode = false;
 
     loop {
+        // Handle Configurable Autosave check at turn boundary
+        if autosave_interval > 0 && game.turn > 0 && game.turn % autosave_interval == 0 && game.turn != last_autosaved_turn {
+            game.save_game("empire_auto.sav");
+            game.log(format!("Autosaved game at turn {}.", game.turn));
+            last_autosaved_turn = game.turn;
+        }
+
         if let Some(game_over_msg) = game.check_game_over() {
             game.log(game_over_msg.clone());
             disp::refresh_display_with_input(&game, " GAME OVER! Press any key to exit... ");
@@ -270,8 +430,38 @@ fn main() -> io::Result<()> {
         }
 
         if let Some(c_idx) = game.pending_cities.pop() {
+            if observer_mode {
+                game.cities[c_idx].prod = PieceType::Army;
+                continue; 
+            }
             prompt_city_production(&mut game, c_idx);
             continue; 
+        }
+
+        if observer_mode {
+            for p in game.pieces.iter_mut() {
+                if p.owner == Owner::Player {
+                    p.moves_left = 0;
+                }
+            }
+            game.process_turn();
+            
+            disp::refresh_display_with_input(&game, "[DEV OBSERVER MODE] Computer playing. Press 'O' or 'ESC' to cancel...");
+            
+            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = event::read() {
+                    match key.code {
+                        KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Esc => {
+                            observer_mode = false;
+                            game.mode = GameMode::Manual;
+                            game.log(String::from("Exited Dev Observer Mode."));
+                            while event::poll(Duration::from_millis(0)).unwrap_or(false) { let _ = event::read(); }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            continue;
         }
 
         if game.mode == GameMode::Edit {
@@ -308,12 +498,17 @@ fn main() -> io::Result<()> {
                     if let Event::Key(key) = ev {
                         game.viewport_center = None;
                         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                            let mut stdout = io::stdout();
-                            let _ = stdout.execute(crossterm::event::DisableMouseCapture);
-                            let _ = stdout.execute(cursor::Show);
-                            let _ = terminal::disable_raw_mode();
-                            let _ = stdout.execute(terminal::LeaveAlternateScreen);
-                            std::process::exit(0);
+                            if prompt_quit_confirmation(&game) {
+                                let mut stdout = io::stdout();
+                                let _ = stdout.execute(crossterm::event::DisableMouseCapture);
+                                let _ = stdout.execute(cursor::Show);
+                                let _ = terminal::disable_raw_mode();
+                                let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                                std::process::exit(0);
+                            } else {
+                                game.log(String::from("Quit cancelled."));
+                                continue;
+                            }
                         }
 
                         match key.code {
@@ -688,36 +883,68 @@ fn main() -> io::Result<()> {
                                                     game.default_orders.push((ptype, act));
                                                 }
                                                 
-                                                let mut updated = 0;
+                                                let mut updated_indices = Vec::new();
                                                 for city in &game.cities {
                                                     if city.owner == Owner::Player {
                                                         if !city.default_orders.iter().any(|(p, _)| *p == ptype) {
                                                             let c_loc = city.loc;
-                                                            for p in game.pieces.iter_mut() {
-                                                                if p.loc == c_loc && p.owner == Owner::Player && p.ptype == ptype && p.hits > 0 {
+                                                            for (i, p) in game.pieces.iter_mut().enumerate() {
+                                                                let is_awaiting = matches!(p.activity, UnitActivity::Idle | UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dir(_, _) | UnitActivity::Dest(_));
+                                                                if p.loc == c_loc && p.owner == Owner::Player && p.ptype == ptype && p.hits > 0 && is_awaiting {
                                                                     p.activity = act;
-                                                                    updated += 1;
+                                                                    updated_indices.push(i);
                                                                 }
                                                             }
                                                         }
                                                     }
                                                 }
-                                                game.log(format!("GLOBAL default order for {:?} set to {:?} (Applied to {} units).", ptype, act, updated));
+                                                game.log(format!("GLOBAL default order for {:?} set to {:?} (Applied to {} units).", ptype, act, updated_indices.len()));
+                                                
+                                                for idx in updated_indices {
+                                                    match act {
+                                                        UnitActivity::Explore => game.explore_piece(idx),
+                                                        UnitActivity::Attack => game.attack_piece(idx),
+                                                        UnitActivity::Random => game.random_piece(idx),
+                                                        UnitActivity::Dest(_) => game.dest_piece(idx),
+                                                        UnitActivity::Dir(_, _) => game.dir_piece(idx),
+                                                        UnitActivity::Fill => game.process_fill_mode(idx),
+                                                        UnitActivity::Upgrade => game.process_upgrade_mode(idx),
+                                                        UnitActivity::Land => game.process_land_mode(idx),
+                                                        _ => {}
+                                                    }
+                                                }
+                                                game.pieces.retain(|p| p.hits > 0);
                                             } else if let Some(c_idx) = edit_c_idx {
                                                 if let Some(idx) = game.cities[c_idx].default_orders.iter().position(|(p, _)| *p == ptype) {
                                                     game.cities[c_idx].default_orders[idx].1 = act;
                                                 } else {
                                                     game.cities[c_idx].default_orders.push((ptype, act));
                                                 }
-                                                let mut updated = 0;
+                                                let mut updated_indices = Vec::new();
                                                 let city_loc = game.cities[c_idx].loc;
-                                                for p in game.pieces.iter_mut() {
-                                                    if p.loc == city_loc && p.owner == Owner::Player && p.ptype == ptype {
+                                                for (i, p) in game.pieces.iter_mut().enumerate() {
+                                                    let is_awaiting = matches!(p.activity, UnitActivity::Idle | UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dir(_, _) | UnitActivity::Dest(_));
+                                                    if p.loc == city_loc && p.owner == Owner::Player && p.ptype == ptype && p.hits > 0 && is_awaiting {
                                                         p.activity = act;
-                                                        updated += 1;
+                                                        updated_indices.push(i);
                                                     }
                                                 }
-                                                game.log(format!("LOCAL City({},{}) order for {:?} set to {:?} (Applied to {} stacked units).", game.cities[c_idx].loc.r, game.cities[c_idx].loc.c, ptype, act, updated));
+                                                game.log(format!("LOCAL City({},{}) order for {:?} set to {:?} (Applied to {} stacked units).", game.cities[c_idx].loc.r, game.cities[c_idx].loc.c, ptype, act, updated_indices.len()));
+                                                
+                                                for idx in updated_indices {
+                                                    match act {
+                                                        UnitActivity::Explore => game.explore_piece(idx),
+                                                        UnitActivity::Attack => game.attack_piece(idx),
+                                                        UnitActivity::Random => game.random_piece(idx),
+                                                        UnitActivity::Dest(_) => game.dest_piece(idx),
+                                                        UnitActivity::Dir(_, _) => game.dir_piece(idx),
+                                                        UnitActivity::Fill => game.process_fill_mode(idx),
+                                                        UnitActivity::Upgrade => game.process_upgrade_mode(idx),
+                                                        UnitActivity::Land => game.process_land_mode(idx),
+                                                        _ => {}
+                                                    }
+                                                }
+                                                game.pieces.retain(|p| p.hits > 0);
                                             }
                                         } else {
                                             game.log(String::from("Order update cancelled."));
@@ -813,22 +1040,32 @@ fn main() -> io::Result<()> {
                     if let Event::Key(key) = ev {
                         game.viewport_center = None;
                         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                            let mut stdout = io::stdout();
-                            let _ = stdout.execute(DisableMouseCapture); 
-                            let _ = stdout.execute(cursor::Show);
-                            let _ = terminal::disable_raw_mode();
-                            let _ = stdout.execute(terminal::LeaveAlternateScreen);
-                            return Ok(());
+                            if prompt_quit_confirmation(&game) {
+                                let mut stdout = io::stdout();
+                                let _ = stdout.execute(DisableMouseCapture); 
+                                let _ = stdout.execute(cursor::Show);
+                                let _ = terminal::disable_raw_mode();
+                                let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                                return Ok(());
+                            } else {
+                                game.log(String::from("Quit cancelled."));
+                                continue;
+                            }
                         }
                         if let KeyCode::Char(ch) = key.code {
                             match ch.to_ascii_lowercase() {
                                 'q' => {
-                                    let mut stdout = io::stdout();
-                                    let _ = stdout.execute(DisableMouseCapture);
-                                    let _ = stdout.execute(cursor::Show);
-                                    let _ = terminal::disable_raw_mode();
-                                    let _ = stdout.execute(terminal::LeaveAlternateScreen);
-                                    return Ok(());
+                                    if prompt_quit_confirmation(&game) {
+                                        let mut stdout = io::stdout();
+                                        let _ = stdout.execute(DisableMouseCapture);
+                                        let _ = stdout.execute(cursor::Show);
+                                        let _ = terminal::disable_raw_mode();
+                                        let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                                        return Ok(());
+                                    } else {
+                                        game.log(String::from("Quit cancelled."));
+                                        continue;
+                                    }
                                 }
                                 'o' | 'm' => {
                                     game.mode = GameMode::Manual;
@@ -913,12 +1150,17 @@ fn main() -> io::Result<()> {
                     if let Event::Key(key) = ev {
                             game.viewport_center = None;
                             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                                let mut stdout = io::stdout();
-                                let _ = stdout.execute(DisableMouseCapture);
-                                let _ = stdout.execute(cursor::Show);
-                                let _ = terminal::disable_raw_mode();
-                                let _ = stdout.execute(terminal::LeaveAlternateScreen);
-                                return Ok(());
+                                if prompt_quit_confirmation(&game) {
+                                    let mut stdout = io::stdout();
+                                    let _ = stdout.execute(DisableMouseCapture);
+                                    let _ = stdout.execute(cursor::Show);
+                                    let _ = terminal::disable_raw_mode();
+                                    let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                                    return Ok(());
+                                } else {
+                                    game.log(String::from("Quit cancelled."));
+                                    continue;
+                                }
                             }
 
                             if let KeyCode::Char(ch) = key.code {
@@ -1025,9 +1267,10 @@ fn main() -> io::Result<()> {
                                                         break;
                                                     } else if k.code == KeyCode::Enter {
                                                         game.pieces[piece_idx].activity = UnitActivity::Dest(game.edit_cursor);
-                                                        game.pieces[piece_idx].moves_left = 0; 
                                                         game.mode = GameMode::Manual;
                                                         game.log(format!("{:?} ordered to march toward ({},{}).", ptype, game.edit_cursor.r, game.edit_cursor.c));
+                                                        game.dest_piece(piece_idx);
+                                                        game.pieces.retain(|p| p.hits > 0);
                                                         break;
                                                     } else {
                                                         match k.code {
@@ -1070,13 +1313,14 @@ fn main() -> io::Result<()> {
                                         }
                                         if let Some((dr, dc)) = chosen_dir {
                                             game.pieces[piece_idx].activity = UnitActivity::Dir(dr, dc);
-                                            game.pieces[piece_idx].moves_left = 0; 
                                             let dir_name = match (dr, dc) {
                                                 (-1, 0) => "North", (1, 0) => "South", (0, -1) => "West", (0, 1) => "East",
                                                 (-1, -1) => "NW", (-1, 1) => "NE", (1, -1) => "SW", (1, 1) => "SE",
                                                 _ => "Unknown",
                                             };
                                             game.log(format!("{:?} ordered to march continuously {}.", ptype, dir_name));
+                                            game.dir_piece(piece_idx);
+                                            game.pieces.retain(|p| p.hits > 0);
                                         } else {
                                             game.log(String::from("March order cancelled."));
                                         }
@@ -1085,18 +1329,33 @@ fn main() -> io::Result<()> {
                                     }
                                     'f' | 'F' => { 
                                         if ptype == PieceType::Transport || ptype == PieceType::Carrier {
-                                            game.pieces[piece_idx].activity = UnitActivity::Fill; game.log(String::from("Unit set to Fill.")); break; 
+                                            game.pieces[piece_idx].activity = UnitActivity::Fill; 
+                                            game.log(String::from("Unit set to Fill.")); 
+                                            game.process_fill_mode(piece_idx);
+                                            break; 
                                         }
                                     }
                                     'l' | 'L' => { 
                                         if ptype == PieceType::Fighter {
-                                            game.pieces[piece_idx].activity = UnitActivity::Land; game.log(String::from("Unit set to Land.")); break; 
+                                            game.pieces[piece_idx].activity = UnitActivity::Land; 
+                                            game.log(String::from("Unit set to Land.")); 
+                                            game.process_land_mode(piece_idx);
+                                            break; 
                                         }
                                     }
-                                    'r' | 'R' => { game.pieces[piece_idx].activity = UnitActivity::Random; game.log(String::from("Unit set to Random.")); break; }
+                                    'r' | 'R' => { 
+                                        game.pieces[piece_idx].activity = UnitActivity::Random; 
+                                        game.log(String::from("Unit set to Random.")); 
+                                        game.random_piece(piece_idx);
+                                        game.pieces.retain(|p| p.hits > 0);
+                                        break; 
+                                    }
                                     'u' | 'U' => { 
                                         if ptype.is_naval() {
-                                            game.pieces[piece_idx].activity = UnitActivity::Upgrade; game.log(String::from("Unit set to Upgrade.")); break; 
+                                            game.pieces[piece_idx].activity = UnitActivity::Upgrade; 
+                                            game.log(String::from("Unit set to Upgrade.")); 
+                                            game.process_upgrade_mode(piece_idx);
+                                            break; 
                                         }
                                     }
                                     _ => {}
@@ -1114,12 +1373,23 @@ fn main() -> io::Result<()> {
                                     _ => {
                                         match ch.to_ascii_lowercase() {
                                             'q' => {
-                                                let mut stdout = io::stdout();
-                                                let _ = stdout.execute(DisableMouseCapture);
-                                                let _ = stdout.execute(cursor::Show);
-                                                let _ = terminal::disable_raw_mode();
-                                                let _ = stdout.execute(terminal::LeaveAlternateScreen);
-                                                return Ok(());
+                                                if prompt_quit_confirmation(&game) {
+                                                    let mut stdout = io::stdout();
+                                                    let _ = stdout.execute(DisableMouseCapture);
+                                                    let _ = stdout.execute(cursor::Show);
+                                                    let _ = terminal::disable_raw_mode();
+                                                    let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                                                    return Ok(());
+                                                } else {
+                                                    game.log(String::from("Quit cancelled."));
+                                                    break;
+                                                }
+                                            }
+                                            'z' => {
+                                                if cfg!(debug_assertions) {
+                                                    observer_mode = true;
+                                                    game.log(String::from("Dev Observer Mode engaged. Player turns skipped."));
+                                                }
                                             }
                                             'a' => {
                                                 game.mode = GameMode::Auto;
@@ -1266,29 +1536,51 @@ fn main() -> io::Result<()> {
             if let Event::Key(key) = ev {
                 game.viewport_center = None;
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    let mut stdout = io::stdout();
-                    let _ = stdout.execute(DisableMouseCapture);
-                    let _ = stdout.execute(cursor::Show);
-                    let _ = terminal::disable_raw_mode();
-                    let _ = stdout.execute(terminal::LeaveAlternateScreen);
-                    return Ok(());
+                    if prompt_quit_confirmation(&game) {
+                        let mut stdout = io::stdout();
+                        let _ = stdout.execute(DisableMouseCapture);
+                        let _ = stdout.execute(cursor::Show);
+                        let _ = terminal::disable_raw_mode();
+                        let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                        return Ok(());
+                    } else {
+                        game.log(String::from("Quit cancelled."));
+                        continue;
+                    }
                 }
 
                 if let KeyCode::Char(ch) = key.code {
                     match ch.to_ascii_lowercase() {
                         'q' => {
-                            let mut stdout = io::stdout();
-                            let _ = stdout.execute(DisableMouseCapture);
-                            let _ = stdout.execute(cursor::Show);
-                            let _ = terminal::disable_raw_mode();
-                            let _ = stdout.execute(terminal::LeaveAlternateScreen);
-                            return Ok(());
+                            if prompt_quit_confirmation(&game) {
+                                let mut stdout = io::stdout();
+                                let _ = stdout.execute(DisableMouseCapture);
+                                let _ = stdout.execute(cursor::Show);
+                                let _ = terminal::disable_raw_mode();
+                                let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                                return Ok(());
+                            } else {
+                                game.log(String::from("Quit cancelled."));
+                                continue;
+                            }
                         }
                         'n' => {
                             game.process_turn();
                         }
                         '`' | '~' => {
-                            game.reveal_entire_map();
+                            if cfg!(debug_assertions) {
+                                game.reveal_entire_map();
+                            } else {
+                                game.log(format!("Unknown command '{}'.", ch));
+                            }
+                        }
+                        'z' => {
+                            if cfg!(debug_assertions) {
+                                observer_mode = true;
+                                game.log(String::from("Dev Observer Mode engaged. Player turns skipped."));
+                            } else {
+                                game.log(format!("Unknown command '{}'.", ch));
+                            }
                         }
                         'a' => {
                             game.mode = GameMode::Auto;

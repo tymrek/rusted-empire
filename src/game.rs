@@ -17,6 +17,8 @@ pub struct Game {
     pub messages: Vec<String>,
     pub msg_scroll: usize,          
     pub pending_cities: Vec<usize>, 
+    pub player_score: u32,
+    pub comp_score: u32,
     pub edit_cursor: Loc,
     pub default_orders: Vec<(PieceType, UnitActivity)>,
     pub viewport_center: Option<Loc>,
@@ -42,6 +44,8 @@ impl Game {
             messages: Vec::new(),
             msg_scroll: 0,
             pending_cities: Vec::new(),
+            player_score: 0,
+            comp_score: 0,
             edit_cursor: Loc { r: 0, c: 0 },
             viewport_center: None,
             last_mouse_coord: None,
@@ -293,7 +297,7 @@ impl Game {
                 -1
             };
 
-            if score > best_score {
+            if score > best_score || best_map.is_empty() {
                 best_score = score;
                 best_map = self.map.clone();
                 best_cities = self.cities.clone();
@@ -366,7 +370,7 @@ impl Game {
 
         let is_bombardment = !can_enter 
             && (ptype == PieceType::Battleship || ptype == PieceType::Destroyer) 
-            && (self.pieces.iter().any(|p| p.loc == target_loc && p.owner != unit_owner && p.hits > 0) 
+            && (self.pieces.iter().any(|p| p.loc == target_loc && p.owner != unit_owner && p.hits > 0 && p.ptype != PieceType::Satellite) 
                 || self.cities.iter().any(|c| c.loc == target_loc && c.owner != unit_owner));
 
         if !can_enter && ptype != PieceType::Fighter && !is_bombardment {
@@ -380,6 +384,7 @@ impl Game {
         if ptype != PieceType::Satellite {
             for (i, other) in self.pieces.iter().enumerate() {
                 if i != piece_idx && other.loc == target_loc && other.hits > 0 {
+                    if other.ptype == PieceType::Satellite { continue; }
                     if other.owner == unit_owner {
                         let can_board_transport = ptype == PieceType::Army && other.ptype == PieceType::Transport && other.cargo.len() < 6;
                         let can_board_carrier = ptype == PieceType::Fighter && other.ptype == PieceType::Carrier && other.cargo.len() < other.hits as usize;
@@ -403,6 +408,9 @@ impl Game {
             let mut boarded_piece = self.pieces[piece_idx].clone();
             boarded_piece.loc = target_loc;
             boarded_piece.moves_left = 0;
+            if ptype == PieceType::Fighter {
+                boarded_piece.fuel = 32;
+            }
             self.pieces[carrier_idx].cargo.push(boarded_piece);
             self.pieces[piece_idx].hits = 0;
             
@@ -428,6 +436,15 @@ impl Game {
             let attacked_player = self.pieces[e_idx].owner == Owner::Player;
 
             if self.pieces[piece_idx].hits <= 0 {
+                if self.pieces[e_idx].owner == Owner::Player { self.player_score += ptype.build_cost() as u32; }
+                else if self.pieces[e_idx].owner == Owner::Comp { self.comp_score += ptype.build_cost() as u32; }
+            }
+            if self.pieces[e_idx].hits <= 0 {
+                if unit_owner == Owner::Player { self.player_score += e_type.build_cost() as u32; }
+                else if unit_owner == Owner::Comp { self.comp_score += e_type.build_cost() as u32; }
+            }
+
+            if self.pieces[piece_idx].hits <= 0 {
                 let msg = if is_player { format!(">>> DEFEAT! Your {:?} was DESTROYED by enemy {:?}! <<<", ptype, e_type) } 
                           else if attacked_player { format!(">>> DEFENSE! Your {:?} DESTROYED attacking enemy {:?}! <<<", e_type, ptype) } 
                           else { String::new() };
@@ -439,12 +456,18 @@ impl Game {
                     
                     // Combat Drag Logic: Ensure deck units ride along if a transport attacks and occupies a tile
                     if ptype == PieceType::Transport || ptype == PieceType::Carrier {
+                        let max_capacity = if ptype == PieceType::Transport { 6 } else { self.pieces[piece_idx].hits as usize };
+                        let current_cargo = self.pieces[piece_idx].cargo.len();
+                        let mut deck_space = max_capacity.saturating_sub(current_cargo);
+
                         for i in 0..self.pieces.len() {
+                            if deck_space == 0 { break; }
                             if i != piece_idx && self.pieces[i].loc == old_loc && self.pieces[i].owner == unit_owner && self.pieces[i].hits > 0 {
                                 let optype = self.pieces[i].ptype;
                                 if (ptype == PieceType::Transport && optype == PieceType::Army) ||
                                    (ptype == PieceType::Carrier && optype == PieceType::Fighter) {
                                     self.pieces[i].loc = target_loc;
+                                    deck_space -= 1;
                                 }
                             }
                         }
@@ -471,10 +494,26 @@ impl Game {
                     }
                 }
                 
-                let win_msg = if is_player && is_bombardment { format!(">>> BOMBARDMENT VICTORY! Your {:?} DESTROYED enemy {:?}! <<<", ptype, e_type) }
+                let mut win_msg = if is_player && is_bombardment { format!(">>> BOMBARDMENT VICTORY! Your {:?} DESTROYED enemy {:?}! <<<", ptype, e_type) }
                               else if is_player { format!(">>> VICTORY! Your {:?} DESTROYED enemy {:?}! <<<", ptype, e_type) }
                               else if attacked_player { format!(">>> ALERT! Your {:?} was DESTROYED by enemy {:?}! <<<", e_type, ptype) }
                               else { String::new() };
+
+                if ptype == PieceType::Fighter {
+                    self.pieces[piece_idx].fuel -= 1;
+                    let at_base = self.cities.iter().any(|c| c.loc == target_loc && c.owner == unit_owner);
+                    let at_carrier = self.pieces.iter().any(|p| p.loc == target_loc && p.owner == unit_owner && p.ptype == PieceType::Carrier && p.hits > 0);
+
+                    if at_base || at_carrier {
+                        self.pieces[piece_idx].fuel = 32;
+                    } else if self.pieces[piece_idx].fuel <= 0 {
+                        self.pieces[piece_idx].hits = 0;
+                        if is_player {
+                            win_msg = format!("{} \n>>> MAYDAY! Your Fighter then ran out of fuel and crashed! <<<", win_msg);
+                        }
+                    }
+                }
+
                 return (MoveResult::CombatWon, win_msg);
             }
         }
@@ -520,6 +559,12 @@ impl Game {
                             return (MoveResult::CityCaptured(c_idx), String::new());
                         }
                     } else {
+                        if was_friendly {
+                            self.player_score += ptype.build_cost() as u32;
+                        } else if city.owner == Owner::Comp {
+                            self.comp_score += ptype.build_cost() as u32;
+                        }
+
                         if is_player {
                             return (MoveResult::CityAssaultFailed, format!(">>> ASSAULT FAILED! Army DESTROYED at ({},{})! <<<", target_loc.r, target_loc.c));
                         } else if was_friendly {
@@ -538,12 +583,18 @@ impl Game {
 
         // Mobile Sector Drag Logic: Pull any awake units sharing the deck to the new tile
         if ptype == PieceType::Transport || ptype == PieceType::Carrier {
+            let max_capacity = if ptype == PieceType::Transport { 6 } else { self.pieces[piece_idx].hits as usize };
+            let current_cargo = self.pieces[piece_idx].cargo.len();
+            let mut deck_space = max_capacity.saturating_sub(current_cargo);
+
             for i in 0..self.pieces.len() {
+                if deck_space == 0 { break; }
                 if i != piece_idx && self.pieces[i].loc == old_loc && self.pieces[i].owner == unit_owner && self.pieces[i].hits > 0 {
                     let optype = self.pieces[i].ptype;
                     if (ptype == PieceType::Transport && optype == PieceType::Army) ||
                        (ptype == PieceType::Carrier && optype == PieceType::Fighter) {
                         self.pieces[i].loc = target_loc;
+                        deck_space -= 1;
                     }
                 }
             }
@@ -732,9 +783,6 @@ impl Game {
             if city.owner != Owner::Comp {
                 attack_map[city.loc.r][city.loc.c] = 0;
                 attack_queue.push_back((city.loc.r, city.loc.c, 0));
-            } else {
-                ferry_map[city.loc.r][city.loc.c] = 0;
-                ferry_queue.push_back((city.loc.r, city.loc.c, 0));
             }
         }
         for p in &self.pieces {
@@ -806,8 +854,10 @@ impl Game {
                     &attack_map
                 };
 
-                let mut best_step = None;
-                let mut best_dist = map_to_use[p_loc.r][p_loc.c];
+                let current_dist = map_to_use[p_loc.r][p_loc.c];
+                let mut min_found_dist = current_dist;
+                let mut best_steps = Vec::new();
+                let mut wiggle_steps = Vec::new();
 
                 for &dir in &dirs {
                     let tr = p_loc.r as i32 + dir.0;
@@ -824,17 +874,37 @@ impl Game {
                         };
 
                         if can_enter && !self.is_tile_blocked_by_friend(next_loc, ptype, Owner::Comp) {
-                            let d = map_to_use[next_loc.r][next_loc.c];
-                            // Unit must strictly step downhill
-                            if d < best_dist {
-                                best_dist = d;
-                                best_step = Some(next_loc);
+                            let mut d = map_to_use[next_loc.r][next_loc.c];
+                            let current_is_land = self.map[p_loc.r][p_loc.c] == b'#';
+                            
+                            // Force armies on land to board adjacent available transports
+                            if ptype == PieceType::Army && current_is_land && !is_land {
+                                d = -1;
+                            }
+
+                            if d < min_found_dist {
+                                min_found_dist = d;
+                                best_steps.clear();
+                                best_steps.push(next_loc);
+                            } else if d == min_found_dist && d < current_dist {
+                                best_steps.push(next_loc);
+                            } else if d == current_dist {
+                                wiggle_steps.push(next_loc);
                             }
                         }
                     }
                 }
 
-                if let Some(step) = best_step {
+                let mut rng = rand::thread_rng();
+                let chosen_step = if !best_steps.is_empty() {
+                    Some(best_steps[rng.gen_range(0..best_steps.len())])
+                } else if !wiggle_steps.is_empty() && rng.gen_bool(0.5) {
+                    Some(wiggle_steps[rng.gen_range(0..wiggle_steps.len())])
+                } else {
+                    None
+                };
+
+                if let Some(step) = chosen_step {
                     visited.push(step);
                     let old_loc = self.pieces[idx].loc;
                     let _ = self.attempt_move(idx, step);
@@ -866,14 +936,10 @@ impl Game {
                         if r >= 0 && r < self.rows as i32 && c >= 0 && c < self.cols as i32 {
                             let loc_rc = Loc { r: r as usize, c: c as usize };
                             if self.map[loc_rc.r][loc_rc.c] == b'#' {
-                                if p.owner == Owner::Player {
+                                let near_enemy_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner != Owner::Comp);
+                                let near_friendly_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner == Owner::Comp);
+                                if near_enemy_city || !near_friendly_city {
                                     should_unload = true;
-                                } else {
-                                    let near_enemy_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner != Owner::Comp);
-                                    let near_friendly_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner == Owner::Comp);
-                                    if near_enemy_city || !near_friendly_city {
-                                        should_unload = true;
-                                    }
                                 }
                             }
                         }
@@ -895,6 +961,8 @@ impl Game {
 
         let mut new_pieces = Vec::new();
         let mut logs_to_add = Vec::new();
+        
+        let comp_cities_count = self.cities.iter().filter(|c| c.owner == Owner::Comp).count();
 
         for (idx, city) in self.cities.iter_mut().enumerate() {
             if city.owner == Owner::Neutral {
@@ -952,14 +1020,28 @@ impl Game {
                         }
                     }
                     let mut rng = rand::thread_rng();
+                    
                     if is_coastal {
                         let roll = rng.gen_range(0..100);
-                        city.prod = if roll < 30 { PieceType::Army }
-                                    else if roll < 60 { PieceType::Transport }
-                                    else if roll < 80 { PieceType::Battleship }
-                                    else { PieceType::Fighter };
+                        if comp_cities_count < 8 {
+                            // Early game: Flood the island with Armies and Transports
+                            city.prod = if roll < 60 { PieceType::Army }
+                                        else if roll < 80 { PieceType::Transport }
+                                        else if roll < 90 { PieceType::Fighter }
+                                        else { PieceType::PatrolBoat };
+                        } else {
+                            // Mid/Late game: Standard naval escalation
+                            city.prod = if roll < 20 { PieceType::Army }
+                                        else if roll < 30 { PieceType::Fighter }
+                                        else if roll < 45 { PieceType::Transport }
+                                        else if roll < 55 { PieceType::PatrolBoat }
+                                        else if roll < 70 { PieceType::Destroyer }
+                                        else if roll < 80 { PieceType::Submarine }
+                                        else if roll < 90 { PieceType::Carrier }
+                                        else { PieceType::Battleship };
+                        }
                     } else {
-                        city.prod = if rng.gen_bool(0.7) { PieceType::Army } else { PieceType::Fighter };
+                        city.prod = if rng.gen_bool(0.8) { PieceType::Army } else { PieceType::Fighter };
                     }
                 }
             }
@@ -1162,7 +1244,7 @@ impl Game {
                 for msg in attack_logs.drain(..) {
                     self.log(msg);
                 }
-                self.pieces[piece_idx].activity = UnitActivity::Explore;
+                self.explore_piece(piece_idx);
                 return;
             }
 
@@ -1215,7 +1297,7 @@ impl Game {
                 for msg in attack_logs.drain(..) {
                     self.log(msg);
                 }
-                self.pieces[piece_idx].activity = UnitActivity::Explore;
+                self.explore_piece(piece_idx);
                 return; 
             }
 

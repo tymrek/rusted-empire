@@ -1,6 +1,7 @@
 use crate::game::Game;
 use crate::models::{GameMode, Owner, PieceType, Loc};
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -11,16 +12,13 @@ use ratatui::{
 };
 type TuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
 
-static mut TUI_TERMINAL: Option<TuiTerminal> = None;
+static TUI_TERMINAL: OnceLock<Mutex<TuiTerminal>> = OnceLock::new();
 
-fn get_terminal() -> &'static mut TuiTerminal {
-    unsafe {
-        if TUI_TERMINAL.is_none() {
-            let backend = CrosstermBackend::new(std::io::stdout());
-            TUI_TERMINAL = Some(Terminal::new(backend).unwrap());
-        }
-        TUI_TERMINAL.as_mut().unwrap()
-    }
+fn get_terminal() -> std::sync::MutexGuard<'static, TuiTerminal> {
+    TUI_TERMINAL.get_or_init(|| {
+        let backend = CrosstermBackend::new(std::io::stdout());
+        Mutex::new(Terminal::new(backend).unwrap())
+    }).lock().unwrap()
 }
 
 pub fn refresh_display_with_input(game: &Game, prompt: &str) {
@@ -28,7 +26,7 @@ pub fn refresh_display_with_input(game: &Game, prompt: &str) {
 }
 
 pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_blink: Option<(Loc, bool)>) {
-    let terminal = get_terminal();
+    let mut terminal = get_terminal();
 
     terminal.draw(|f| {
         let size = f.size();
@@ -187,6 +185,8 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         let enemy_cities = game.cities.iter().filter(|c| c.owner == Owner::Comp).count();
 let mut sidebar_lines = vec![
             Line::from(Span::styled("--- STATUS ---", Style::default().fg(Color::Yellow))),
+            Line::from(format!(" My Score: {}", game.player_score)),
+            Line::from(format!(" Enemy Score: {}", game.comp_score)),
             Line::from(format!(" Armies: {}", player_armies)),
             Line::from(format!(" My Cities: {}", player_cities)),
             Line::from(format!(" Enemy Cities: {}", enemy_cities)),

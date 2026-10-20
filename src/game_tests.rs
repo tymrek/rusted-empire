@@ -637,4 +637,186 @@ mod tests {
         assert_eq!(awakened_army.loc, Loc { r: 6, c: 6 }, "Awakened Army should spawn on the Transport's current tile");
         assert_eq!(awakened_army.activity, UnitActivity::Idle, "Awakened Army should be ready for orders");
     }
+
+    #[test]
+    fn test_mobile_sector_drag_exploit_limit() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        game.map[5][5] = b'#';
+
+        // Transport at (5,5)
+        game.pieces.push(Piece {
+            id: 1, ptype: PieceType::Transport, owner: Owner::Player,
+            loc: Loc { r: 5, c: 5 }, hits: 1, moves_left: 2, activity: UnitActivity::Idle,
+            cargo: Vec::new(), fuel: 0,
+        });
+
+        // 10 Armies stacked at (5,5)
+        for i in 0..10 {
+            game.pieces.push(Piece {
+                id: i + 2, ptype: PieceType::Army, owner: Owner::Player,
+                loc: Loc { r: 5, c: 5 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle,
+                cargo: Vec::new(), fuel: 0,
+            });
+        }
+
+        // Move transport out to sea
+        let (res, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(res, MoveResult::Moved);
+
+        let armies_at_sea = game.pieces.iter().filter(|p| p.ptype == PieceType::Army && p.loc == Loc { r: 5, c: 6 }).count();
+        let armies_on_land = game.pieces.iter().filter(|p| p.ptype == PieceType::Army && p.loc == Loc { r: 5, c: 5 }).count();
+
+        assert_eq!(armies_at_sea, 6, "Transport should drag exactly 6 armies out to sea");
+        assert_eq!(armies_on_land, 4, "4 armies should be left behind on the original land tile");
+    }
+
+    #[test]
+    fn test_logistics_transport_wait_boarding() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+
+        // Player Transport at (5,5)
+        game.pieces.push(Piece {
+            id: 1, ptype: PieceType::Transport, owner: Owner::Player,
+            loc: Loc { r: 5, c: 5 }, hits: 1, moves_left: 2, activity: UnitActivity::Idle,
+            cargo: Vec::new(), fuel: 0,
+        });
+
+        // Player Army at (6,6) waiting for transport
+        game.pieces.push(Piece {
+            id: 2, ptype: PieceType::Army, owner: Owner::Player,
+            loc: Loc { r: 6, c: 6 }, hits: 1, moves_left: 0, activity: UnitActivity::TransportWait,
+            cargo: Vec::new(), fuel: 0,
+        });
+
+        let did_board = game.process_transport_wait(1);
+        
+        assert!(did_board, "Army should successfully find and board the adjacent transport");
+        assert_eq!(game.pieces[0].cargo.len(), 1, "Transport should have 1 unit in cargo");
+        assert_eq!(game.pieces[1].hits, 0, "Original Army entity should be marked for cleanup");
+    }
+
+    #[test]
+    fn test_ai_flow_field_pathfinding() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'#'; 10]; 10]; // All land
+
+        // Player City at (1,1)
+        game.cities.push(City {
+            loc: Loc { r: 1, c: 1 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+        });
+
+        // Comp Army at (8,8)
+        game.pieces.push(Piece {
+            id: 1, ptype: PieceType::Army, owner: Owner::Comp,
+            loc: Loc { r: 8, c: 8 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle,
+            cargo: Vec::new(), fuel: 0,
+        });
+
+        game.process_comp_ai();
+
+        let new_loc = game.pieces[0].loc;
+        assert_ne!(new_loc, Loc { r: 8, c: 8 }, "Comp Army should have moved");
+        
+        let old_dist = (8isize - 1).pow(2) + (8isize - 1).pow(2);
+        let new_dist = (new_loc.r as isize - 1).pow(2) + (new_loc.c as isize - 1).pow(2);
+        
+        assert!(new_dist < old_dist, "Comp Army should move strictly closer to the Player target via gradient descent");
+    }
+
+    #[test]
+    fn test_game_over_conditions() {
+        let mut game = Game::new(10, 10, 50);
+
+        game.cities.push(City { loc: Loc { r: 0, c: 0 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
+        game.cities.push(City { loc: Loc { r: 0, c: 1 }, owner: Owner::Comp, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
+
+        game.pieces.push(Piece { id: 1, ptype: PieceType::Army, owner: Owner::Player, loc: Loc { r: 1, c: 0 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle, cargo: Vec::new(), fuel: 0 });
+        game.pieces.push(Piece { id: 2, ptype: PieceType::Army, owner: Owner::Comp, loc: Loc { r: 1, c: 1 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle, cargo: Vec::new(), fuel: 0 });
+
+        assert!(game.check_game_over().is_none(), "Game should continue with forces on both sides");
+
+        game.cities[0].owner = Owner::Comp;
+        game.pieces[0].hits = 0;
+        
+        let defeat = game.check_game_over();
+        assert!(defeat.is_some() && defeat.unwrap().contains("DEFEAT"), "Player defeat should trigger when losing all cities and units");
+
+        game.cities[0].owner = Owner::Player;
+        game.cities[1].owner = Owner::Player;
+        game.pieces[0].hits = 1;
+        game.pieces[1].hits = 1; // Leave an enemy unit alive to bypass the 'eradicated' check
+
+        let victory = game.check_game_over();
+        assert!(victory.is_some() && victory.unwrap().contains("TOTAL DOMINATION"), "Total Domination should trigger when holding all cities");
+    }
+
+    #[test]
+    fn test_satellite_orbital_immunity() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'#'; 10]; 10]; 
+
+        // Enemy Satellite
+        game.pieces.push(Piece {
+            id: 1, ptype: PieceType::Satellite, owner: Owner::Comp,
+            loc: Loc { r: 5, c: 6 }, hits: 1, moves_left: 10, activity: UnitActivity::Idle,
+            cargo: Vec::new(), fuel: 20,
+        });
+
+        // Player Army
+        game.pieces.push(Piece {
+            id: 2, ptype: PieceType::Army, owner: Owner::Player,
+            loc: Loc { r: 5, c: 5 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle,
+            cargo: Vec::new(), fuel: 0,
+        });
+
+        let (result, _) = game.attempt_move(1, Loc { r: 5, c: 6 });
+
+        assert_eq!(result, MoveResult::Moved, "Army should simply move under the satellite");
+        assert_eq!(game.pieces[0].hits, 1, "Satellite should not be damaged or engaged in combat");
+        assert_eq!(game.pieces[1].loc, Loc { r: 5, c: 6 }, "Army should share the tile with the enemy satellite");
+    }
+
+    #[test]
+    fn test_fighter_grope_bingo_fuel_return() {
+        let mut game = Game::new(10, 20, 50);
+        game.map = vec![vec![b'.'; 20]; 10];
+        
+        game.cities.push(City {
+            loc: Loc { r: 5, c: 5 },
+            owner: Owner::Player,
+            prod: PieceType::Army,
+            work: 0,
+            default_orders: Vec::new(),
+        });
+        
+        // Fighter exploring far away. Distance to base = 6.
+        // Bingo fuel threshold: dist (6) + 2 = 8
+        let fighter = Piece {
+            id: 1,
+            ptype: PieceType::Fighter,
+            owner: Owner::Player,
+            loc: Loc { r: 5, c: 11 },
+            hits: 1,
+            moves_left: 8,
+            activity: UnitActivity::Explore,
+            cargo: Vec::new(),
+            fuel: 8, 
+        };
+        game.pieces.push(fighter);
+        
+        game.explore_piece(0);
+        
+        assert_eq!(game.pieces[0].activity, UnitActivity::Land, "Fighter should abort grope and switch to Land when hitting bingo fuel");
+        assert_eq!(game.pieces[0].moves_left, 0, "Fighter should halt its current movement to process the return order");
+        
+        game.process_land_mode(0);
+        
+        if let UnitActivity::Dest(dest_loc) = game.pieces[0].activity {
+            assert_eq!(dest_loc, Loc { r: 5, c: 5 }, "Fighter should target the nearest base to land");
+        } else {
+            panic!("Fighter activity should be Dest(base)");
+        }
+    }
 }
