@@ -23,6 +23,10 @@ pub struct Game {
     pub default_orders: Vec<(PieceType, UnitActivity)>,
     pub viewport_center: Option<Loc>,
     pub last_mouse_coord: Option<(u16, u16)>,
+    /// Next piece id to hand out. Ids are never reused, even after a piece dies
+    /// or while it is riding in a transport's cargo hold.
+    #[serde(default)]
+    pub next_id: usize,
 }
 
 impl Game {
@@ -49,6 +53,7 @@ impl Game {
             edit_cursor: Loc { r: 0, c: 0 },
             viewport_center: None,
             last_mouse_coord: None,
+            next_id: 1,
             default_orders: vec![
                 (PieceType::Army, UnitActivity::Idle),
                 (PieceType::Fighter, UnitActivity::Idle),
@@ -110,6 +115,15 @@ impl Game {
             self.map[0][c] = b'.';
             self.map[self.rows - 1][c] = b'.';
         }
+    }
+
+    /// First id that is safe to assign: above the stored counter and above every id
+    /// currently in play, including pieces carried in cargo (which are not in `self.pieces`).
+    fn next_free_id(&self) -> usize {
+        fn max_id(pieces: &[Piece]) -> usize {
+            pieces.iter().map(|p| p.id.max(max_id(&p.cargo))).max().unwrap_or(0)
+        }
+        self.next_id.max(max_id(&self.pieces) + 1)
     }
 
     pub fn dist_to_nearest_base(&self, loc: Loc) -> Option<i32> {
@@ -963,6 +977,7 @@ impl Game {
         let mut logs_to_add = Vec::new();
         
         let comp_cities_count = self.cities.iter().filter(|c| c.owner == Owner::Comp).count();
+        let mut next_id = self.next_free_id();
 
         for (idx, city) in self.cities.iter_mut().enumerate() {
             if city.owner == Owner::Neutral {
@@ -982,8 +997,8 @@ impl Game {
                     ));
                 }
 
-                let max_id = self.pieces.iter().map(|p| p.id).max().unwrap_or(0);
-                let new_id = max_id + 1 + new_pieces.len();
+                let new_id = next_id;
+                next_id += 1;
                 
                 let starting_activity = if city.owner == Owner::Player {
                     city.default_orders.iter().find(|(p, _)| *p == city.prod).map(|(_, a)| *a)
@@ -1050,6 +1065,7 @@ impl Game {
         for msg in logs_to_add {
             self.log(msg);
         }
+        self.next_id = next_id;
         self.pieces.extend(new_pieces);
 
         let mut auto_explore_indices = Vec::new();
@@ -1069,9 +1085,9 @@ impl Game {
 
         for (idx, p) in self.pieces.iter_mut().enumerate() {
             if p.owner == Owner::Player || p.owner == Owner::Comp {
-                if p.moves_left <= 0 {
-                    p.moves_left = p.ptype.max_moves();
-                }
+                // Every unit starts a new turn with its full movement allowance;
+                // unspent moves from the previous turn do not carry over (or get lost).
+                p.moves_left = p.ptype.max_moves();
 
                 let at_friendly_city = self.cities.iter().any(|c| c.loc == p.loc && c.owner == p.owner);
                 if at_friendly_city && matches!(p.activity, UnitActivity::Sentry | UnitActivity::Fill | UnitActivity::TransportWait | UnitActivity::Upgrade) {
