@@ -1,0 +1,191 @@
+From 6bb05ff462aead3469ce8bad0d3d44e8df82c8cd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 20 Oct 2026 21:35:16 +0000
+Subject: [PATCH] Refresh full moves each turn; never reuse piece ids
+
+- process_turn only reset moves_left when it was <= 0, so a unit that
+  ended a turn with unspent moves started the next one short. Every unit
+  now gets its full allowance at the start of each turn.
+- New piece ids were max(id in self.pieces) + 1, which ignores pieces
+  riding in cargo, so a unit built while the highest ids were in a hold
+  could duplicate a cargo id. Ids now come from a persisted counter
+  (Game::next_id, serde default for old saves) that is also kept above
+  every id in play, cargo included, and is never reused after a death.
+
+Adds three regression tests; all fail on the old code.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GTdH6hWDgnKLdVJLxfpadu
+---
+ src/game.rs       | 26 +++++++++++++---
+ src/game_tests.rs | 77 +++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 98 insertions(+), 5 deletions(-)
+
+diff --git a/src/game.rs b/src/game.rs
+index dfd046b..c0827bb 100644
+--- a/src/game.rs
++++ b/src/game.rs
+@@ -23,6 +23,10 @@ pub struct Game {
+     pub default_orders: Vec<(PieceType, UnitActivity)>,
+     pub viewport_center: Option<Loc>,
+     pub last_mouse_coord: Option<(u16, u16)>,
++    /// Next piece id to hand out. Ids are never reused, even after a piece dies
++    /// or while it is riding in a transport's cargo hold.
++    #[serde(default)]
++    pub next_id: usize,
+ }
+ 
+ impl Game {
+@@ -49,6 +53,7 @@ impl Game {
+             edit_cursor: Loc { r: 0, c: 0 },
+             viewport_center: None,
+             last_mouse_coord: None,
++            next_id: 1,
+             default_orders: vec![
+                 (PieceType::Army, UnitActivity::Idle),
+                 (PieceType::Fighter, UnitActivity::Idle),
+@@ -112,6 +117,15 @@ impl Game {
+         }
+     }
+ 
++    /// First id that is safe to assign: above the stored counter and above every id
++    /// currently in play, including pieces carried in cargo (which are not in `self.pieces`).
++    fn next_free_id(&self) -> usize {
++        fn max_id(pieces: &[Piece]) -> usize {
++            pieces.iter().map(|p| p.id.max(max_id(&p.cargo))).max().unwrap_or(0)
++        }
++        self.next_id.max(max_id(&self.pieces) + 1)
++    }
++
+     pub fn dist_to_nearest_base(&self, loc: Loc) -> Option<i32> {
+         let mut min_dist: Option<i32> = None;
+         for city in &self.cities {
+@@ -963,6 +977,7 @@ impl Game {
+         let mut logs_to_add = Vec::new();
+         
+         let comp_cities_count = self.cities.iter().filter(|c| c.owner == Owner::Comp).count();
++        let mut next_id = self.next_free_id();
+ 
+         for (idx, city) in self.cities.iter_mut().enumerate() {
+             if city.owner == Owner::Neutral {
+@@ -982,8 +997,8 @@ impl Game {
+                     ));
+                 }
+ 
+-                let max_id = self.pieces.iter().map(|p| p.id).max().unwrap_or(0);
+-                let new_id = max_id + 1 + new_pieces.len();
++                let new_id = next_id;
++                next_id += 1;
+                 
+                 let starting_activity = if city.owner == Owner::Player {
+                     city.default_orders.iter().find(|(p, _)| *p == city.prod).map(|(_, a)| *a)
+@@ -1050,6 +1065,7 @@ impl Game {
+         for msg in logs_to_add {
+             self.log(msg);
+         }
++        self.next_id = next_id;
+         self.pieces.extend(new_pieces);
+ 
+         let mut auto_explore_indices = Vec::new();
+@@ -1069,9 +1085,9 @@ impl Game {
+ 
+         for (idx, p) in self.pieces.iter_mut().enumerate() {
+             if p.owner == Owner::Player || p.owner == Owner::Comp {
+-                if p.moves_left <= 0 {
+-                    p.moves_left = p.ptype.max_moves();
+-                }
++                // Every unit starts a new turn with its full movement allowance;
++                // unspent moves from the previous turn do not carry over (or get lost).
++                p.moves_left = p.ptype.max_moves();
+ 
+                 let at_friendly_city = self.cities.iter().any(|c| c.loc == p.loc && c.owner == p.owner);
+                 if at_friendly_city && matches!(p.activity, UnitActivity::Sentry | UnitActivity::Fill | UnitActivity::TransportWait | UnitActivity::Upgrade) {
+diff --git a/src/game_tests.rs b/src/game_tests.rs
+index ba161b4..9c7400a 100644
+--- a/src/game_tests.rs
++++ b/src/game_tests.rs
+@@ -819,4 +819,81 @@ mod tests {
+             panic!("Fighter activity should be Dest(base)");
+         }
+     }
++
++    fn test_piece(id: usize, ptype: PieceType, owner: Owner, r: usize, c: usize) -> Piece {
++        Piece {
++            id,
++            ptype,
++            owner,
++            loc: Loc { r, c },
++            hits: ptype.max_hits(),
++            moves_left: ptype.max_moves(),
++            activity: UnitActivity::Idle,
++            cargo: Vec::new(),
++            fuel: 32,
++        }
++    }
++
++    #[test]
++    fn test_turn_refreshes_full_moves() {
++        let mut game = Game::new(10, 10, 50);
++        game.map = vec![vec![b'.'; 10]; 10];
++        let mut fighter = test_piece(1, PieceType::Fighter, Owner::Player, 5, 5);
++        fighter.moves_left = 5; // spent 3 of 8 last turn
++        let mut idle_army = test_piece(2, PieceType::Army, Owner::Player, 1, 1);
++        idle_army.moves_left = 0;
++        game.pieces.push(fighter);
++        game.pieces.push(idle_army);
++
++        game.process_turn();
++
++        assert_eq!(game.pieces[0].moves_left, PieceType::Fighter.max_moves());
++        assert_eq!(game.pieces[1].moves_left, PieceType::Army.max_moves());
++    }
++
++    #[test]
++    fn test_new_piece_ids_skip_cargo_ids() {
++        let mut game = Game::new(10, 10, 50);
++        game.map = vec![vec![b'.'; 10]; 10];
++        game.map[2][2] = b'#';
++        let mut transport = test_piece(1, PieceType::Transport, Owner::Player, 5, 5);
++        transport.cargo.push(test_piece(2, PieceType::Army, Owner::Player, 5, 5));
++        game.pieces.push(transport);
++        game.cities.push(City {
++            loc: Loc { r: 2, c: 2 },
++            owner: Owner::Player,
++            prod: PieceType::Army,
++            work: PieceType::Army.build_cost() - 1,
++            default_orders: Vec::new(),
++        });
++
++        game.process_turn(); // city completes an Army
++        game.wake_cargo(0); // cargo army comes back onto the deck
++
++        let mut ids: Vec<usize> = game.pieces.iter().map(|p| p.id).collect();
++        ids.sort_unstable();
++        ids.dedup();
++        assert_eq!(ids.len(), game.pieces.len(), "duplicate piece ids: {:?}", game.pieces.iter().map(|p| p.id).collect::<Vec<_>>());
++    }
++
++    #[test]
++    fn test_piece_ids_not_reused_after_death() {
++        let mut game = Game::new(10, 10, 50);
++        game.map = vec![vec![b'.'; 10]; 10];
++        game.map[2][2] = b'#';
++        game.cities.push(City {
++            loc: Loc { r: 2, c: 2 },
++            owner: Owner::Player,
++            prod: PieceType::Army,
++            work: PieceType::Army.build_cost() - 1,
++            default_orders: Vec::new(),
++        });
++        game.process_turn();
++        let first_id = game.pieces.last().unwrap().id;
++        game.pieces.retain(|p| p.id != first_id); // that piece dies
++        game.cities[0].work = PieceType::Army.build_cost() - 1;
++        game.process_turn();
++        let second_id = game.pieces.last().unwrap().id;
++        assert!(second_id > first_id, "id {} was reused", second_id);
++    }
+ }
+-- 
+2.43.0
+
