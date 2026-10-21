@@ -1,6 +1,11 @@
 use crate::models::*;
 use serde::{Serialize, Deserialize};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
+
+fn fresh_rng() -> StdRng {
+    StdRng::from_entropy()
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Game {
@@ -27,6 +32,11 @@ pub struct Game {
     /// or while it is riding in a transport's cargo hold.
     #[serde(default)]
     pub next_id: usize,
+    /// Source of all randomness (map generation, combat, AI wiggle). Not saved:
+    /// a loaded game gets a fresh entropy-seeded generator. Use `with_seed` /
+    /// `seed_rng` to make a game reproducible.
+    #[serde(skip, default = "fresh_rng")]
+    pub rng: StdRng,
 }
 
 impl Game {
@@ -54,6 +64,7 @@ impl Game {
             viewport_center: None,
             last_mouse_coord: None,
             next_id: 1,
+            rng: fresh_rng(),
             default_orders: vec![
                 (PieceType::Army, UnitActivity::Idle),
                 (PieceType::Fighter, UnitActivity::Idle),
@@ -68,14 +79,24 @@ impl Game {
         }
     }
 
+    /// A new game whose map, combat and AI choices are fully determined by `seed`.
+    pub fn with_seed(rows: usize, cols: usize, difficulty: u32, seed: u64) -> Self {
+        let mut game = Self::new(rows, cols, difficulty);
+        game.seed_rng(seed);
+        game
+    }
+
+    pub fn seed_rng(&mut self, seed: u64) {
+        self.rng = StdRng::seed_from_u64(seed);
+    }
+
     pub fn generate_map(&mut self) {
-        let mut rng = rand::thread_rng();
         let water_percent = 62; 
         let smooth_passes = 5;
 
         for r in 0..self.rows {
             for c in 0..self.cols {
-                if rng.gen_range(0..100) < water_percent {
+                if self.rng.gen_range(0..100) < water_percent {
                     self.map[r][c] = b'.';
                 } else {
                     self.map[r][c] = b'#';
@@ -226,7 +247,6 @@ impl Game {
             self.cities.clear();
             self.generate_map();
 
-            let mut rng = rand::thread_rng();
             let mut land_tiles = Vec::new();
 
             for r in 1..self.rows - 1 {
@@ -243,7 +263,7 @@ impl Game {
             }
 
             for i in 0..land_tiles.len() {
-                let j = rng.gen_range(0..land_tiles.len());
+                let j = self.rng.gen_range(0..land_tiles.len());
                 land_tiles.swap(i, j);
             }
 
@@ -352,8 +372,7 @@ impl Game {
         }
         
         let c_continent = &valid_continents[c_cont_idx];
-        let mut rng = rand::thread_rng();
-        let c_cap_idx = c_continent[rng.gen_range(0..c_continent.len())];
+        let c_cap_idx = c_continent[self.rng.gen_range(0..c_continent.len())];
         self.cities[c_cap_idx].owner = Owner::Comp;
 
         let player_capitals: Vec<Loc> = self.cities.iter()
@@ -386,7 +405,7 @@ impl Game {
 
         self.pieces[piece_idx].hits = 0;
 
-        if rand::thread_rng().gen_bool(0.5) {
+        if self.rng.gen_bool(0.5) {
             for p in self.pieces.iter_mut() {
                 if p.loc != loc || p.hits <= 0 || p.ptype == PieceType::Satellite || p.owner != city_owner {
                     continue;
@@ -627,7 +646,6 @@ impl Game {
         }
 
         if let Some(e_idx) = enemy_idx {
-            let mut rng = rand::thread_rng();
             let e_type = self.pieces[e_idx].ptype;
             let p_damage = self.pieces[piece_idx].ptype.strike_damage();
             let e_damage = e_type.strike_damage();
@@ -635,7 +653,7 @@ impl Game {
             // Same model as the original game: each round exactly one side lands a blow,
             // 50/50. (Letting both sides roll every round favoured whoever rolled first.)
             while self.pieces[piece_idx].hits > 0 && self.pieces[e_idx].hits > 0 {
-                if rng.gen_bool(0.5) {
+                if self.rng.gen_bool(0.5) {
                     self.pieces[e_idx].hits -= p_damage;
                 } else {
                     self.pieces[piece_idx].hits -= e_damage;
@@ -1064,11 +1082,10 @@ impl Game {
                     }
                 }
 
-                let mut rng = rand::thread_rng();
                 let chosen_step = if !best_steps.is_empty() {
-                    Some(best_steps[rng.gen_range(0..best_steps.len())])
-                } else if !wiggle_steps.is_empty() && rng.gen_bool(0.5) {
-                    Some(wiggle_steps[rng.gen_range(0..wiggle_steps.len())])
+                    Some(best_steps[self.rng.gen_range(0..best_steps.len())])
+                } else if !wiggle_steps.is_empty() && self.rng.gen_bool(0.5) {
+                    Some(wiggle_steps[self.rng.gen_range(0..wiggle_steps.len())])
                 } else {
                     None
                 };
@@ -1196,10 +1213,9 @@ impl Game {
                             }
                         }
                     }
-                    let mut rng = rand::thread_rng();
                     
                     if is_coastal {
-                        let roll = rng.gen_range(0..100);
+                        let roll = self.rng.gen_range(0..100);
                         if comp_cities_count < 8 {
                             // Early game: Flood the island with Armies and Transports
                             city.prod = if roll < 60 { PieceType::Army }
@@ -1218,7 +1234,7 @@ impl Game {
                                         else { PieceType::Battleship };
                         }
                     } else {
-                        city.prod = if rng.gen_bool(0.8) { PieceType::Army } else { PieceType::Fighter };
+                        city.prod = if self.rng.gen_bool(0.8) { PieceType::Army } else { PieceType::Fighter };
                     }
                 }
             }
@@ -1498,7 +1514,6 @@ impl Game {
         if self.pieces[piece_idx].owner != Owner::Player || self.pieces[piece_idx].hits <= 0 { return; }
 
         let mut random_logs = Vec::new();
-        let mut rng = rand::thread_rng();
 
         while self.pieces[piece_idx].moves_left > 0 && self.pieces[piece_idx].hits > 0 {
             let ptype = self.pieces[piece_idx].ptype;
@@ -1533,7 +1548,7 @@ impl Game {
                 break;
             }
 
-            let chosen_step = valid_steps[rng.gen_range(0..valid_steps.len())];
+            let chosen_step = valid_steps[self.rng.gen_range(0..valid_steps.len())];
 
             let (result, msg) = self.attempt_move(piece_idx, chosen_step);
             if !msg.is_empty() {

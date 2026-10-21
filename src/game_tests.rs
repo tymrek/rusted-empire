@@ -1362,4 +1362,44 @@ mod tests {
         assert!(game.suicidal_move_prompt(PieceType::Destroyer, Owner::Player, Loc { r: 5, c: 4 }).unwrap().contains("ashore"));
         assert!(game.suicidal_move_prompt(PieceType::Destroyer, Owner::Player, east).is_none(), "sea is safe for ships");
     }
+
+    // ---- seeded RNG ----
+
+    fn snapshot(game: &Game) -> (Vec<Vec<u8>>, Vec<(usize, usize, Owner)>) {
+        (game.map.clone(), game.cities.iter().map(|c| (c.loc.r, c.loc.c, c.owner)).collect())
+    }
+
+    #[test]
+    fn test_same_seed_generates_identical_world() {
+        let mut a = Game::with_seed(60, 120, 50, 42);
+        let mut b = Game::with_seed(60, 120, 50, 42);
+        a.setup_initial_states();
+        b.setup_initial_states();
+        assert_eq!(snapshot(&a), snapshot(&b));
+    }
+
+    #[test]
+    fn test_different_seeds_generate_different_worlds() {
+        let mut a = Game::with_seed(60, 120, 50, 1);
+        let mut b = Game::with_seed(60, 120, 50, 2);
+        a.setup_initial_states();
+        b.setup_initial_states();
+        assert_ne!(snapshot(&a).0, snapshot(&b).0);
+    }
+
+    #[test]
+    fn test_same_seed_gives_identical_combat() {
+        let outcome = |seed: u64| {
+            let mut game = Game::with_seed(10, 10, 50, seed);
+            game.map = vec![vec![b'#'; 10]; 10];
+            game.pieces.push(test_piece(0, PieceType::Army, Owner::Player, 5, 5));
+            game.pieces.push(test_piece(1, PieceType::Army, Owner::Comp, 5, 6));
+            game.pieces[0].hits = 50;
+            game.pieces[1].hits = 50;
+            game.attempt_move(0, Loc { r: 5, c: 6 });
+            (game.pieces[0].hits, game.pieces[1].hits)
+        };
+        assert_eq!(outcome(7), outcome(7));
+        assert!((0..20).any(|s| outcome(s) != outcome(7)), "different seeds should vary");
+    }
 }
