@@ -1453,6 +1453,30 @@ fn main() -> io::Result<()> {
                                             break;
                                         }
 
+                                        // As in the original game, moves that destroy the unit (a fighter
+                                        // or ship into an enemy city, a ship ashore, an army into the sea)
+                                        // are confirmed first.
+                                        if let Some(prompt) = game.suicidal_move_prompt(ptype, Owner::Player, target_loc) {
+                                            disp::refresh_display_with_input(&game, prompt);
+                                            let mut confirm = false;
+                                            loop {
+                                                if let Ok(Event::Key(k)) = event::read() {
+                                                    if let KeyCode::Char(c) = k.code {
+                                                        match c.to_ascii_lowercase() {
+                                                            'y' => { confirm = true; break; }
+                                                            'n' => { break; }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if !confirm {
+                                                game.log(String::from("Move cancelled."));
+                                                while event::poll(Duration::from_millis(0)).unwrap_or(false) { let _ = event::read(); }
+                                                break;
+                                            }
+                                        }
+
                                         if ptype == PieceType::Fighter {
                                             if let Some(dist) = game.dist_to_nearest_base(target_loc) {
                                                 let remaining_fuel = game.pieces[piece_idx].fuel - 1;

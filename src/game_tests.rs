@@ -119,11 +119,13 @@ mod tests {
         for i in 1..=7 {
             let (res, _) = game.attempt_move(i, Loc { r: 5, c: 5 });
             if res == MoveResult::Moved { army_success += 1; }
-            else if res == MoveResult::InvalidMove { army_fail += 1; }
+            // As in the original game, an army that insists on a full transport drowns.
+            else if res == MoveResult::CombatLost { army_fail += 1; }
         }
 
         assert_eq!(army_success, 6, "Transport should accept exactly 6 armies");
-        assert_eq!(army_fail, 1, "Transport should reject the 7th army");
+        assert_eq!(army_fail, 1, "The 7th army should drown (no room on the transport)");
+        assert!(game.pieces[7].hits <= 0, "the 7th army is lost");
         assert_eq!(game.pieces[0].cargo.len(), 6, "Transport cargo array should hold 6 items");
 
         let carrier_idx = game.pieces.len();
@@ -382,26 +384,109 @@ mod tests {
     }
 
     #[test]
-    fn test_combat_naval_bombardment() {
+    fn test_ship_entering_enemy_city_breaks_up_on_shore() {
+        // Original VMS-Empire: ships can't take cities; trying destroys the ship.
+        for owner in [Owner::Comp, Owner::Neutral] {
+            for ptype in [PieceType::PatrolBoat, PieceType::Destroyer, PieceType::Submarine, PieceType::Carrier, PieceType::Battleship, PieceType::Transport] {
+                let mut game = Game::new(10, 10, 50);
+                game.map = vec![vec![b'.'; 10]; 10];
+                game.map[5][6] = b'#';
+                game.pieces.push(Piece {
+                    id: 1, ptype, owner: Owner::Player,
+                    loc: Loc { r: 5, c: 5 }, hits: ptype.max_hits(), moves_left: 2, activity: UnitActivity::Idle,
+                    cargo: Vec::new(), fuel: 0,
+                });
+                game.cities.push(City {
+                    loc: Loc { r: 5, c: 6 }, owner, prod: PieceType::Army, work: 5, default_orders: Vec::new(),
+                });
+
+                let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+
+                assert_eq!(result, MoveResult::CombatLost, "{:?} should be destroyed", ptype);
+                assert!(game.pieces[0].hits <= 0);
+                assert_eq!(game.cities[0].work, 5, "no bombardment: production is untouched");
+                assert_eq!(game.cities[0].owner, owner);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ship_may_still_enter_its_own_city() {
         let mut game = Game::new(10, 10, 50);
         game.map = vec![vec![b'.'; 10]; 10];
-        game.map[5][6] = b'#'; 
-
-        game.pieces.push(Piece {
-            id: 1, ptype: PieceType::Battleship, owner: Owner::Player,
-            loc: Loc { r: 5, c: 5 }, hits: 10, moves_left: 2, activity: UnitActivity::Idle,
-            cargo: Vec::new(), fuel: 0,
-        });
-        
+        game.map[5][6] = b'#';
+        game.pieces.push(test_piece(1, PieceType::Destroyer, Owner::Player, 5, 5));
         game.cities.push(City {
-            loc: Loc { r: 5, c: 6 }, owner: Owner::Comp, prod: PieceType::Army, work: 5, default_orders: Vec::new(),
+            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
         });
-
         let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
-        
-        assert_eq!(result, MoveResult::Moved, "Bombardment evaluates as Moved for the shelling action");
-        assert_eq!(game.cities[0].work, 0, "Bombardment should reset city production work to 0");
-        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 5 }, "Battleship must not enter the land tile");
+        assert_eq!(result, MoveResult::Moved);
+        assert!(game.pieces[0].hits > 0);
+    }
+
+    #[test]
+    fn test_fighter_entering_enemy_city_is_shot_down() {
+        for owner in [Owner::Comp, Owner::Neutral] {
+            let mut game = Game::new(10, 10, 50);
+            game.map = vec![vec![b'.'; 10]; 10];
+            game.map[5][6] = b'#';
+            game.pieces.push(test_piece(1, PieceType::Fighter, Owner::Player, 5, 5));
+            game.cities.push(City {
+                loc: Loc { r: 5, c: 6 }, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+            });
+            let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+            assert_eq!(result, MoveResult::CombatLost);
+            assert!(game.pieces[0].hits <= 0);
+        }
+    }
+
+    #[test]
+    fn test_fighter_may_land_in_its_own_city() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        game.map[5][6] = b'#';
+        game.pieces.push(test_piece(1, PieceType::Fighter, Owner::Player, 5, 5));
+        game.cities.push(City {
+            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+        });
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::Moved);
+        assert!(game.pieces[0].hits > 0);
+    }
+
+    #[test]
+    fn test_automated_movers_never_fly_into_enemy_cities() {
+        // Standing orders must not throw a fighter away: marching in a direction stops short.
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        game.map[5][6] = b'#';
+        let mut f = test_piece(1, PieceType::Fighter, Owner::Player, 5, 5);
+        f.activity = UnitActivity::Dir(0, 1);
+        game.pieces.push(f);
+        game.cities.push(City {
+            loc: Loc { r: 5, c: 6 }, owner: Owner::Comp, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+        });
+        game.dir_piece(0);
+        assert!(game.pieces[0].hits > 0, "fighter must survive");
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 5 });
+    }
+
+    #[test]
+    fn test_computer_units_never_suicide_into_player_cities() {
+        // A computer ship and fighter heading for a player city must hold short of it.
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        game.map[5][6] = b'#';
+        game.cities.push(City {
+            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+        });
+        game.pieces.push(test_piece(1, PieceType::Destroyer, Owner::Comp, 5, 5));
+        game.pieces.push(test_piece(2, PieceType::Fighter, Owner::Comp, 5, 4));
+        for _ in 0..20 {
+            for p in game.pieces.iter_mut() { p.moves_left = p.ptype.max_moves(); p.fuel = 32; }
+            game.process_comp_ai();
+        }
+        assert!(game.pieces.iter().all(|p| p.hits > 0), "computer units were thrown away on the city");
     }
 
     #[test]
@@ -1037,5 +1122,244 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- city assault (original VMS-Empire rules) ----
+
+    /// Player army at (5,4) next to a Comp city at (5,5) full of defenders.
+    fn city_assault_world() -> Game {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'#'; 10]; 10];
+        game.cities.push(City {
+            loc: Loc { r: 5, c: 5 },
+            owner: Owner::Comp,
+            prod: PieceType::Destroyer,
+            work: 7,
+            default_orders: vec![(PieceType::Army, UnitActivity::Sentry)],
+        });
+        game.pieces.push(test_piece(1, PieceType::Army, Owner::Player, 5, 4)); // attacker
+        game.pieces.push(test_piece(2, PieceType::Army, Owner::Comp, 5, 5));
+        game.pieces.push(test_piece(3, PieceType::Fighter, Owner::Comp, 5, 5));
+        let mut transport = test_piece(4, PieceType::Transport, Owner::Comp, 5, 5);
+        transport.cargo.push(test_piece(5, PieceType::Army, Owner::Comp, 5, 5));
+        game.pieces.push(transport);
+        game.pieces.push(test_piece(6, PieceType::Satellite, Owner::Comp, 5, 5));
+        game
+    }
+
+    /// Re-runs the assault on a fresh world until it gets the wanted outcome.
+    fn assault_until(want_capture: bool) -> Game {
+        for _ in 0..500 {
+            let mut game = city_assault_world();
+            let (result, _) = game.attempt_move(0, Loc { r: 5, c: 5 });
+            if matches!(result, MoveResult::CityCaptured(_)) == want_capture {
+                return game;
+            }
+        }
+        panic!("never saw the wanted outcome in 500 tries");
+    }
+
+    #[test]
+    fn test_city_assault_is_a_coin_flip_regardless_of_defenders() {
+        let trials = 20_000;
+        let captured = (0..trials)
+            .filter(|_| {
+                let mut game = city_assault_world();
+                matches!(game.attempt_move(0, Loc { r: 5, c: 5 }).0, MoveResult::CityCaptured(_))
+            })
+            .count();
+        let rate = captured as f64 / trials as f64;
+        assert!((0.48..=0.52).contains(&rate), "capture rate {}", rate);
+    }
+
+    #[test]
+    fn test_failed_city_assault_leaves_city_and_defenders_alone() {
+        let game = assault_until(false);
+        assert_eq!(game.pieces[0].hits, 0, "attacking army is spent");
+        assert_eq!(game.cities[0].owner, Owner::Comp);
+        assert_eq!(game.cities[0].work, 7);
+        for p in &game.pieces[1..] {
+            assert!(p.hits > 0 && p.owner == Owner::Comp, "defender {:?} must be untouched", p.ptype);
+        }
+        assert_eq!(game.pieces[3].cargo.len(), 1);
+    }
+
+    #[test]
+    fn test_captured_city_resets_and_converts_its_contents() {
+        let game = assault_until(true);
+        assert_eq!(game.pieces[0].hits, 0, "attacking army is dispersed");
+        let city = &game.cities[0];
+        assert_eq!(city.owner, Owner::Player);
+        assert_eq!(city.work, 0, "production progress resets");
+        assert!(city.default_orders.is_empty(), "standing orders reset");
+
+        assert!(game.pieces[1].hits <= 0, "defending army dies when the city falls");
+        assert_eq!(game.pieces[2].owner, Owner::Player, "fighter changes sides");
+        assert_eq!(game.pieces[2].activity, UnitActivity::Idle);
+        assert_eq!(game.pieces[3].owner, Owner::Player, "transport changes sides");
+        assert!(game.pieces[3].cargo.is_empty(), "transport cargo is lost");
+        assert_eq!(game.pieces[4].owner, Owner::Comp, "satellite is unaffected");
+        assert!(game.pieces[4].hits > 0);
+    }
+
+    // ---- ships attacking ashore (original: the attacking ship always breaks up) ----
+
+    fn shore_world(attacker: PieceType, attacker_hits: i32) -> Game {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        game.map[5][6] = b'#';
+        let mut ship = test_piece(1, attacker, Owner::Player, 5, 5);
+        ship.hits = attacker_hits;
+        game.pieces.push(ship);
+        game.pieces.push(test_piece(2, PieceType::Army, Owner::Comp, 5, 6));
+        game
+    }
+
+    #[test]
+    fn test_ship_that_wins_a_shore_assault_still_breaks_up() {
+        let mut game = shore_world(PieceType::Battleship, 1000); // cannot realistically lose
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatWon);
+        assert!(game.pieces[1].hits <= 0, "the army ashore is destroyed");
+        assert!(game.pieces[0].hits <= 0, "the victorious ship breaks up on shore");
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 5 });
+    }
+
+    #[test]
+    fn test_ship_that_loses_a_shore_assault_is_destroyed() {
+        let mut game = shore_world(PieceType::Destroyer, 1);
+        game.pieces[1].hits = 1000;
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatLost);
+        assert!(game.pieces[0].hits <= 0);
+        assert!(game.pieces[1].hits > 0);
+    }
+
+    #[test]
+    fn test_ship_defending_at_sea_is_not_broken_up() {
+        // The break-up rule is for a ship that initiates the attack, not one that defends.
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        let mut fighter = test_piece(1, PieceType::Fighter, Owner::Comp, 5, 5);
+        fighter.hits = 1;
+        let mut ship = test_piece(2, PieceType::Battleship, Owner::Player, 5, 6);
+        ship.hits = 1000;
+        game.pieces.push(fighter);
+        game.pieces.push(ship);
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatLost);
+        assert!(game.pieces[1].hits > 0, "the defending ship survives");
+    }
+
+    #[test]
+    fn test_automated_attack_never_launches_a_shore_assault() {
+        let mut game = shore_world(PieceType::Battleship, 10);
+        game.pieces[0].activity = UnitActivity::Attack;
+        game.reveal_entire_map();
+        game.attack_piece(0);
+        assert!(game.pieces[0].hits > 0, "standing orders must not make a ship break itself up");
+        assert!(game.pieces[1].hits > 0);
+    }
+
+    // ---- ships ashore and armies at sea: original terrain rules ----
+
+    #[test]
+    fn test_every_ship_type_may_attack_ashore_and_breaks_up() {
+        for ptype in [PieceType::PatrolBoat, PieceType::Destroyer, PieceType::Submarine,
+                      PieceType::Carrier, PieceType::Battleship, PieceType::Transport] {
+            let mut game = shore_world(ptype, 1000);
+            let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+            assert_eq!(result, MoveResult::CombatWon, "{:?} should fight the army ashore", ptype);
+            assert!(game.pieces[1].hits <= 0, "{:?}: the army ashore dies", ptype);
+            assert!(game.pieces[0].hits <= 0, "{:?} breaks up on shore after winning", ptype);
+        }
+    }
+
+    #[test]
+    fn test_ship_going_ashore_with_nothing_there_breaks_up() {
+        let mut game = shore_world(PieceType::Destroyer, 3);
+        game.pieces.pop(); // remove the army: just empty land
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatLost);
+        assert!(game.pieces[0].hits <= 0);
+    }
+
+    #[test]
+    fn test_ship_cannot_go_ashore_onto_a_friendly_unit() {
+        let mut game = shore_world(PieceType::Destroyer, 3);
+        game.pieces[1].owner = Owner::Player; // our own army is there
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::InvalidMove);
+        assert!(game.pieces[0].hits > 0);
+    }
+
+    fn sea_world(army_hits: i32) -> Game {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![b'.'; 10]; 10];
+        game.map[5][5] = b'#'; // the army stands on land, the sea is to its east
+        let mut army = test_piece(1, PieceType::Army, Owner::Player, 5, 5);
+        army.hits = army_hits;
+        game.pieces.push(army);
+        game
+    }
+
+    #[test]
+    fn test_army_walking_into_empty_sea_drowns() {
+        let mut game = sea_world(1);
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatLost);
+        assert!(game.pieces[0].hits <= 0);
+    }
+
+    #[test]
+    fn test_army_that_wins_at_sea_still_drowns() {
+        let mut game = sea_world(1000);
+        game.pieces.push(test_piece(2, PieceType::PatrolBoat, Owner::Comp, 5, 6));
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatWon);
+        assert!(game.pieces[1].hits <= 0, "the enemy ship is sunk");
+        assert!(game.pieces[0].hits <= 0, "the army drowns after its assault");
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 5 });
+    }
+
+    #[test]
+    fn test_army_that_loses_at_sea_is_destroyed() {
+        let mut game = sea_world(1);
+        let mut ship = test_piece(2, PieceType::Battleship, Owner::Comp, 5, 6);
+        ship.hits = 1000;
+        game.pieces.push(ship);
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatLost);
+        assert!(game.pieces[1].hits > 0, "the defending ship is unharmed in the sense that it survives");
+    }
+
+    #[test]
+    fn test_army_boards_a_transport_with_room_without_drowning() {
+        let mut game = sea_world(1);
+        game.pieces.push(test_piece(2, PieceType::Transport, Owner::Player, 5, 6));
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::Moved);
+        assert_eq!(game.pieces[1].cargo.len(), 1);
+    }
+
+    #[test]
+    fn test_army_stepping_off_a_transport_into_open_sea_drowns() {
+        let mut game = sea_world(1);
+        game.map[5][5] = b'.'; // the army is on a transport at sea
+        game.pieces.push(test_piece(2, PieceType::Transport, Owner::Player, 5, 5));
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatLost);
+    }
+
+    #[test]
+    fn test_suicidal_moves_are_flagged_for_confirmation() {
+        let mut game = sea_world(1);
+        let east = Loc { r: 5, c: 6 };
+        assert!(game.suicidal_move_prompt(PieceType::Army, Owner::Player, east).unwrap().contains("go to sea"));
+        assert!(game.suicidal_move_prompt(PieceType::Army, Owner::Player, Loc { r: 5, c: 4 }).is_some()); // more sea
+        game.map[5][4] = b'#';
+        assert!(game.suicidal_move_prompt(PieceType::Army, Owner::Player, Loc { r: 5, c: 4 }).is_none(), "land is safe");
+        assert!(game.suicidal_move_prompt(PieceType::Destroyer, Owner::Player, Loc { r: 5, c: 4 }).unwrap().contains("ashore"));
+        assert!(game.suicidal_move_prompt(PieceType::Destroyer, Owner::Player, east).is_none(), "sea is safe for ships");
     }
 }

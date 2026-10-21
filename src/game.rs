@@ -369,6 +369,126 @@ impl Game {
         self.log(format!("Game initialized. {} cities scattered across the world.", self.cities.len()));
     }
 
+    /// An army's assault on a neutral or enemy city, as in the original game's `attack_city`.
+    ///
+    /// It is a pure 50% coin flip and the army is spent either way. Pieces inside the city
+    /// take no part in the fight. If the assault succeeds the city falls (`kill_city`):
+    /// the previous owner's armies in it die, its other pieces (ships, fighters) change
+    /// sides, a transport's cargo is lost, and the city's production and standing orders
+    /// are reset. Satellites are unaffected.
+    fn assault_city(&mut self, piece_idx: usize, c_idx: usize) -> (MoveResult, String) {
+        let unit_owner = self.pieces[piece_idx].owner;
+        let is_player = unit_owner == Owner::Player;
+        let ptype = self.pieces[piece_idx].ptype;
+        let loc = self.cities[c_idx].loc;
+        let city_owner = self.cities[c_idx].owner;
+        let was_friendly = city_owner == Owner::Player;
+
+        self.pieces[piece_idx].hits = 0;
+
+        if rand::thread_rng().gen_bool(0.5) {
+            for p in self.pieces.iter_mut() {
+                if p.loc != loc || p.hits <= 0 || p.ptype == PieceType::Satellite || p.owner != city_owner {
+                    continue;
+                }
+                if p.ptype == PieceType::Army {
+                    p.hits = 0;
+                    continue;
+                }
+                if p.ptype == PieceType::Transport {
+                    p.cargo.clear();
+                } else {
+                    for c in p.cargo.iter_mut() {
+                        c.owner = unit_owner;
+                        c.activity = UnitActivity::Idle;
+                    }
+                }
+                p.owner = unit_owner;
+                p.activity = UnitActivity::Idle;
+            }
+
+            let city = &mut self.cities[c_idx];
+            city.owner = unit_owner;
+            city.work = 0;
+            city.default_orders.clear();
+            if unit_owner == Owner::Comp {
+                city.prod = PieceType::Army;
+            }
+
+            if is_player {
+                self.reveal_vision(loc, ptype.sight_range());
+                (MoveResult::CityCaptured(c_idx), format!(">>> CITY CAPTURED! You took ({},{})! <<<", loc.r, loc.c))
+            } else if was_friendly {
+                (MoveResult::CityCaptured(c_idx), format!(">>> ALERT! The enemy captured your city at ({},{})! <<<", loc.r, loc.c))
+            } else {
+                (MoveResult::CityCaptured(c_idx), String::new())
+            }
+        } else {
+            if was_friendly {
+                self.player_score += ptype.build_cost() as u32;
+            } else if city_owner == Owner::Comp {
+                self.comp_score += ptype.build_cost() as u32;
+            }
+
+            if is_player {
+                (MoveResult::CityAssaultFailed, format!(">>> ASSAULT FAILED! Army DESTROYED at ({},{})! <<<", loc.r, loc.c))
+            } else if was_friendly {
+                (MoveResult::CityAssaultFailed, format!(">>> DEFENSE! Enemy army DESTROYED attacking your city at ({},{})! <<<", loc.r, loc.c))
+            } else {
+                (MoveResult::CityAssaultFailed, String::new())
+            }
+        }
+    }
+
+    /// True if moving `ptype` onto `loc` is suicide, as in the original game: a fighter that
+    /// flies into a neutral or enemy city is shot down, and a ship that tries to enter one
+    /// breaks up on shore. (Only armies can take a city; see `assault_city`.)
+    pub fn is_fatal_city_entry(&self, ptype: PieceType, owner: Owner, loc: Loc) -> bool {
+        (ptype == PieceType::Fighter || ptype.is_naval())
+            && self.cities.iter().any(|c| c.loc == loc && c.owner != owner)
+    }
+
+    /// True if moving onto `loc` is a terrain suicide as in the original game, where the unit
+    /// is lost whatever happens (after winning any fight there):
+    /// - a ship that goes ashore breaks up on shore;
+    /// - an army that walks into the sea, or onto a transport that is full, drowns.
+    /// Cities are handled separately (`is_fatal_city_entry`, `assault_city`).
+    pub fn is_suicidal_terrain_entry(&self, ptype: PieceType, owner: Owner, loc: Loc) -> bool {
+        let is_land = self.map[loc.r][loc.c] == b'#';
+        let own_piece_here = |pred: &dyn Fn(&Piece) -> bool| {
+            self.pieces.iter().any(|p| p.loc == loc && p.owner == owner && p.hits > 0 && pred(p))
+        };
+        if ptype.is_naval() {
+            is_land
+                && !self.cities.iter().any(|c| c.loc == loc)
+                && !own_piece_here(&|p| p.ptype != PieceType::Satellite && p.ptype != PieceType::Fighter)
+        } else if ptype == PieceType::Army {
+            !is_land
+                && !own_piece_here(&|p| p.ptype == PieceType::Transport && p.cargo.len() < 6)
+                && !own_piece_here(&|p| p.ptype != PieceType::Satellite && p.ptype != PieceType::Fighter && p.ptype != PieceType::Transport)
+        } else {
+            false
+        }
+    }
+
+    /// The question the original game asks before a move that destroys the unit, or `None`
+    /// if the move is safe.
+    pub fn suicidal_move_prompt(&self, ptype: PieceType, owner: Owner, loc: Loc) -> Option<&'static str> {
+        if self.is_fatal_city_entry(ptype, owner, loc) {
+            Some("That's never worked before, sir.  Do you really want to try? [Y/N]: ")
+        } else if !self.is_suicidal_terrain_entry(ptype, owner, loc) {
+            None
+        } else if ptype == PieceType::Army {
+            if self.pieces.iter().any(|p| p.loc == loc && p.owner == owner && p.hits > 0 && p.ptype == PieceType::Transport) {
+                Some("Sorry, sir.  There is no more room on the transport.  Do you insist? [Y/N]: ")
+            } else {
+                Some("Troops can't walk on water, sir.  Do you really want to go to sea? [Y/N]: ")
+            }
+        } else {
+            Some("Ships need sea to float, sir.  Do you really want to go ashore? [Y/N]: ")
+        }
+    }
+
     /// Chooses which enemy piece on a tile defends against `attacker`.
     ///
     /// Air fights air and ground fights ground: a fighter must beat the enemy fighter on the
@@ -421,13 +541,34 @@ impl Game {
             _ => !is_land || is_friendly_city, 
         };
 
-        let is_bombardment = !can_enter 
-            && (ptype == PieceType::Battleship || ptype == PieceType::Destroyer) 
-            && (self.pieces.iter().any(|p| p.loc == target_loc && p.owner != unit_owner && p.hits > 0 && p.ptype != PieceType::Satellite) 
-                || self.cities.iter().any(|c| c.loc == target_loc && c.owner != unit_owner));
+        // True when this move kills the unit whatever happens (ship ashore, army at sea).
+        let suicidal = self.is_suicidal_terrain_entry(ptype, unit_owner, target_loc);
 
-        if !can_enter && ptype != PieceType::Fighter && !is_bombardment {
+        // Fighters and ships cannot take a city: the attempt destroys them (the original game
+        // asks "That's never worked before, sir" first; the UI does the same).
+        if self.is_fatal_city_entry(ptype, unit_owner, target_loc) {
+            self.pieces[piece_idx].hits = 0;
+            let msg = if !is_player {
+                String::new()
+            } else if ptype == PieceType::Fighter {
+                format!(">>> Your Fighter was shot down over the city at ({},{})! <<<", target_loc.r, target_loc.c)
+            } else {
+                format!(">>> Your {:?} broke up on shore at ({},{})! <<<", ptype, target_loc.r, target_loc.c)
+            };
+            return (MoveResult::CombatLost, msg);
+        }
+
+        if !can_enter && ptype != PieceType::Fighter && !suicidal {
             return (MoveResult::InvalidMove, if is_player { String::from("Terrain impassable for this unit type.") } else { String::new() });
+        }
+
+        // An army moving onto a neutral or enemy city is a city assault, decided by a coin flip
+        // that ignores whatever is inside (VMS-Empire's attack_city). It never fights the
+        // city's occupants.
+        if ptype == PieceType::Army {
+            if let Some(c_idx) = self.cities.iter().position(|c| c.loc == target_loc && c.owner != unit_owner) {
+                return self.assault_city(piece_idx, c_idx);
+            }
         }
 
         let mut enemy_candidates: Vec<usize> = Vec::new();
@@ -474,6 +615,14 @@ impl Game {
         }
 
         if blocked_by_friend {
+            // An army ordered onto a transport that is full goes into the water and drowns.
+            if ptype == PieceType::Army && !is_land
+                && self.pieces.iter().any(|p| p.loc == target_loc && p.owner == unit_owner && p.hits > 0 && p.ptype == PieceType::Transport)
+            {
+                self.pieces[piece_idx].hits = 0;
+                let msg = if is_player { String::from(">>> Your Army jumped into the briny and drowned! <<<") } else { String::new() };
+                return (MoveResult::CombatLost, msg);
+            }
             return (MoveResult::InvalidMove, if is_player { String::from("Sector is occupied by a friendly unit.") } else { String::new() });
         }
 
@@ -514,7 +663,7 @@ impl Game {
                 // reverse), the winner stays put: it must beat the rest of the stack before it
                 // can occupy the tile or take a city there.
                 let others_remain = enemy_candidates.iter().any(|&i| i != e_idx && self.pieces[i].hits > 0);
-                let advance = !is_bombardment && !others_remain;
+                let advance = !suicidal && !others_remain;
 
                 if advance {
                     let old_loc = self.pieces[piece_idx].loc;
@@ -545,22 +694,16 @@ impl Game {
                     self.reveal_vision(target_loc, ptype.sight_range());
                 }
 
-                if ptype == PieceType::Army && advance {
-                    for (c_idx, city) in self.cities.iter_mut().enumerate() {
-                        if city.loc == target_loc && city.owner != unit_owner {
-                            city.owner = unit_owner;
-                            self.pieces[piece_idx].hits = 0; 
-                            let cap_msg = if is_player {
-                                format!(">>> VICTORY & CITY CAPTURED! You took ({},{})! <<<", target_loc.r, target_loc.c)
-                            } else if attacked_player {
-                                format!(">>> ALERT! The enemy took your city at ({},{})! <<<", target_loc.r, target_loc.c)
-                            } else { String::new() };
-                            return (MoveResult::CityCaptured(c_idx), cap_msg);
-                        }
-                    }
+                // A ship that attacks something ashore breaks up, and an army that attacks
+                // something at sea drowns, even after a successful assault.
+                if suicidal {
+                    self.pieces[piece_idx].hits = 0;
                 }
-                
-                let mut win_msg = if is_player && is_bombardment { format!(">>> BOMBARDMENT VICTORY! Your {:?} DESTROYED enemy {:?}! <<<", ptype, e_type) }
+
+                let mut win_msg = if is_player && suicidal {
+                    let fate = if ptype == PieceType::Army { "drowned" } else { "broke up on shore" };
+                    format!(">>> VICTORY! Your {:?} DESTROYED enemy {:?}, then {} after its assault! <<<", ptype, e_type, fate)
+                }
                               else if is_player { format!(">>> VICTORY! Your {:?} DESTROYED enemy {:?}! <<<", ptype, e_type) }
                               else if attacked_player { format!(">>> ALERT! Your {:?} was DESTROYED by enemy {:?}! <<<", e_type, ptype) }
                               else { String::new() };
@@ -589,62 +732,17 @@ impl Game {
             }
         }
 
-        if is_bombardment {
-            for city in self.cities.iter_mut() {
-                if city.loc == target_loc && city.owner != unit_owner {
-                    city.work = 0;
-                    self.pieces[piece_idx].moves_left -= 1;
-                    if is_player {
-                        self.reveal_vision(target_loc, ptype.sight_range());
-                        return (MoveResult::Moved, format!(">>> BOMBARDMENT! Your {:?} shelled the city at ({},{}), resetting its production! <<<", ptype, target_loc.r, target_loc.c));
-                    } else if city.owner == Owner::Player {
-                        return (MoveResult::Moved, format!(">>> ALERT! Enemy {:?} shelled your city at ({},{}), resetting production! <<<", ptype, target_loc.r, target_loc.c));
-                    }
-                    return (MoveResult::Moved, String::new());
-                }
-            }
-        }
-
-        if ptype == PieceType::Army {
-            for (c_idx, city) in self.cities.iter_mut().enumerate() {
-                if city.loc == target_loc && city.owner != unit_owner { 
-                    let mut rng = rand::thread_rng();
-                    let was_friendly = city.owner == Owner::Player;
-                    
-                    self.pieces[piece_idx].hits = 0; 
-
-                    if rng.gen_bool(0.5) {
-                        city.owner = unit_owner;
-                        
-                        if is_player {
-                            self.reveal_vision(target_loc, ptype.sight_range());
-                            if was_friendly {
-                                return (MoveResult::CityCaptured(c_idx), format!(">>> YOU ATTACKED YOUR OWN CITY! Army destroyed, but the city survived at ({},{})! <<<", target_loc.r, target_loc.c));
-                            } else {
-                                return (MoveResult::CityCaptured(c_idx), format!(">>> CITY CAPTURED! You took ({},{})! <<<", target_loc.r, target_loc.c));
-                            }
-                        } else {
-                            if was_friendly {
-                                return (MoveResult::CityCaptured(c_idx), format!(">>> ALERT! The enemy captured your city at ({},{})! <<<", target_loc.r, target_loc.c));
-                            }
-                            return (MoveResult::CityCaptured(c_idx), String::new());
-                        }
-                    } else {
-                        if was_friendly {
-                            self.player_score += ptype.build_cost() as u32;
-                        } else if city.owner == Owner::Comp {
-                            self.comp_score += ptype.build_cost() as u32;
-                        }
-
-                        if is_player {
-                            return (MoveResult::CityAssaultFailed, format!(">>> ASSAULT FAILED! Army DESTROYED at ({},{})! <<<", target_loc.r, target_loc.c));
-                        } else if was_friendly {
-                            return (MoveResult::CityAssaultFailed, format!(">>> DEFENSE! Enemy army DESTROYED attacking your city at ({},{})! <<<", target_loc.r, target_loc.c));
-                        }
-                        return (MoveResult::CityAssaultFailed, String::new());
-                    }
-                }
-            }
+        if suicidal {
+            // Nothing there to fight: the unit simply goes ashore / into the sea and is lost.
+            self.pieces[piece_idx].hits = 0;
+            let msg = if !is_player {
+                String::new()
+            } else if ptype == PieceType::Army {
+                String::from(">>> Your Army marched dutifully into the sea and drowned! <<<")
+            } else {
+                format!(">>> Your {:?} broke up on shore at ({},{})! <<<", ptype, target_loc.r, target_loc.c)
+            };
+            return (MoveResult::CombatLost, msg);
         }
 
         let old_loc = self.pieces[piece_idx].loc;
@@ -747,7 +845,7 @@ impl Game {
                         let target_loc = Loc { r: target_r, c: target_c };
                         let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
                         
-                        if !friendly_city && !self.is_tile_blocked_by_friend(target_loc, ptype, Owner::Player) {
+                        if !friendly_city && !self.is_fatal_city_entry(ptype, Owner::Player, target_loc) && !self.is_tile_blocked_by_friend(target_loc, ptype, Owner::Player) {
                             valid_steps.push(target_loc);
                         }
                     }
@@ -944,7 +1042,7 @@ impl Game {
                             _ => !is_land || self.cities.iter().any(|c| c.loc == next_loc),
                         };
 
-                        if can_enter && !self.is_tile_blocked_by_friend(next_loc, ptype, Owner::Comp) {
+                        if can_enter && !self.is_fatal_city_entry(ptype, Owner::Comp, next_loc) && !self.is_tile_blocked_by_friend(next_loc, ptype, Owner::Comp) {
                             let mut d = map_to_use[next_loc.r][next_loc.c];
                             let current_is_land = self.map[p_loc.r][p_loc.c] == b'#';
                             
@@ -1297,10 +1395,8 @@ impl Game {
 
                 if target_r < self.rows && target_c < self.cols {
                     let is_land = self.map[target_r][target_c] == b'#';
-                    let target_rc = Loc { r: target_r, c: target_c };
                     let can_enter = match p.ptype {
                         PieceType::Army => is_land,
-                        PieceType::Battleship | PieceType::Destroyer => !is_land || all_targets.contains(&target_rc),
                         _ => !is_land,
                     };
 
@@ -1308,7 +1404,7 @@ impl Game {
                         let target_loc = Loc { r: target_r, c: target_c };
                         let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
                         
-                        if !friendly_city && !self.is_tile_blocked_by_friend(target_loc, p.ptype, Owner::Player) {
+                        if !friendly_city && !self.is_fatal_city_entry(p.ptype, Owner::Player, target_loc) && !self.is_tile_blocked_by_friend(target_loc, p.ptype, Owner::Player) {
                             valid_steps.push(target_loc);
                         }
                     }
@@ -1355,11 +1451,9 @@ impl Game {
                     if target_r < self.rows && target_c < self.cols {
                         if !visited[target_r][target_c] {
                             let is_land = self.map[target_r][target_c] == b'#';
-                            let target_rc = Loc { r: target_r, c: target_c };
                             let can_enter = match p.ptype {
                                 PieceType::Army => is_land,
                                 PieceType::Fighter | PieceType::Satellite => true,
-                                PieceType::Battleship | PieceType::Destroyer => !is_land || all_targets.contains(&target_rc),
                                 _ => !is_land,
                             };
 
@@ -1427,7 +1521,7 @@ impl Game {
                         let target_loc = Loc { r: target_r, c: target_c };
                         let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
                         
-                        if !friendly_city && !self.is_tile_blocked_by_friend(target_loc, ptype, Owner::Player) {
+                        if !friendly_city && !self.is_fatal_city_entry(ptype, Owner::Player, target_loc) && !self.is_tile_blocked_by_friend(target_loc, ptype, Owner::Player) {
                             valid_steps.push(target_loc);
                         }
                     }
@@ -1506,7 +1600,8 @@ impl Game {
                     };
 
                     if can_enter || ptype == PieceType::Fighter {
-                        if (!friendly_city && !self.is_tile_blocked_by_friend(step_loc, ptype, Owner::Player)) || step_loc == target_loc {
+                        if ((!friendly_city && !self.is_tile_blocked_by_friend(step_loc, ptype, Owner::Player)) || step_loc == target_loc)
+                            && !self.is_fatal_city_entry(ptype, Owner::Player, step_loc) {
                             valid_steps.push(step_loc);
                         }
                     }
@@ -1632,7 +1727,7 @@ impl Game {
                 _ => !is_land || friendly_city,
             };
 
-            if ptype != PieceType::Satellite && ((!can_enter && ptype != PieceType::Fighter) || friendly_city || self.is_tile_blocked_by_friend(target_loc, ptype, Owner::Player)) {
+            if ptype != PieceType::Satellite && ((!can_enter && ptype != PieceType::Fighter) || friendly_city || self.is_fatal_city_entry(ptype, Owner::Player, target_loc) || self.is_tile_blocked_by_friend(target_loc, ptype, Owner::Player)) {
                 dir_logs.push(format!("{:?} hit an obstacle at ({},{}) and halted its march.", ptype, target_loc.r, target_loc.c));
                 break; // Leave moves_left > 0 so the TUI can pick it up
             }
