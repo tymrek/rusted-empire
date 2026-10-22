@@ -37,6 +37,10 @@ pub struct Game {
     /// `seed_rng` to make a game reproducible.
     #[serde(skip, default = "fresh_rng")]
     pub rng: StdRng,
+    /// Ids of pieces that changed location since the last turn boundary. A damaged boat
+    /// in its own port that did not move this turn repairs one hit, as in the original.
+    #[serde(default)]
+    pub moved_this_turn: std::collections::HashSet<usize>,
 }
 
 impl Game {
@@ -65,6 +69,7 @@ impl Game {
             last_mouse_coord: None,
             next_id: 1,
             rng: fresh_rng(),
+            moved_this_turn: std::collections::HashSet::new(),
             default_orders: vec![
                 (PieceType::Army, UnitActivity::Idle),
                 (PieceType::Fighter, UnitActivity::Idle),
@@ -646,6 +651,7 @@ impl Game {
 
         if let Some(e_idx) = enemy_idx {
             let e_type = self.pieces[e_idx].ptype;
+            let hits_before_combat = self.pieces[piece_idx].hits;
             let p_damage = self.pieces[piece_idx].ptype.strike_damage();
             let e_damage = e_type.strike_damage();
             
@@ -657,6 +663,14 @@ impl Game {
                 } else {
                     self.pieces[piece_idx].hits -= e_damage;
                 }
+            }
+
+            // Damage taken in the fight slows the rest of this turn's movement (the original
+            // recomputes a unit's allowance from its current hits every step).
+            if self.pieces[piece_idx].hits > 0 {
+                let ptype_now = self.pieces[piece_idx].ptype;
+                let lost = ptype_now.moves_for_hits(hits_before_combat) - ptype_now.moves_for_hits(self.pieces[piece_idx].hits);
+                self.pieces[piece_idx].moves_left = (self.pieces[piece_idx].moves_left - lost).max(0);
             }
 
             let attacked_player = self.pieces[e_idx].owner == Owner::Player;
@@ -685,6 +699,7 @@ impl Game {
                 if advance {
                     let old_loc = self.pieces[piece_idx].loc;
                     self.pieces[piece_idx].loc = target_loc;
+                    self.moved_this_turn.insert(self.pieces[piece_idx].id);
                     
                     // Combat Drag Logic: Ensure deck units ride along if a transport attacks and occupies a tile
                     if ptype == PieceType::Transport || ptype == PieceType::Carrier {
@@ -705,7 +720,7 @@ impl Game {
                         }
                     }
                 }
-                self.pieces[piece_idx].moves_left -= 1;
+                self.pieces[piece_idx].moves_left = (self.pieces[piece_idx].moves_left - 1).max(0);
                 
                 if is_player {
                     self.reveal_vision(target_loc, ptype.sight_range());
@@ -764,6 +779,7 @@ impl Game {
 
         let old_loc = self.pieces[piece_idx].loc;
         self.pieces[piece_idx].loc = target_loc;
+        self.moved_this_turn.insert(self.pieces[piece_idx].id);
         self.pieces[piece_idx].moves_left -= 1;
         let mut move_msg = String::new();
 
@@ -1251,18 +1267,26 @@ impl Game {
             .map(|(_, p)| p.loc)
             .collect();
 
+        // End of the previous turn: a damaged boat that sat in its own port without ever
+        // moving repairs one hit (original rule; applies to both sides).
+        for p in self.pieces.iter_mut() {
+            if (p.owner == Owner::Player || p.owner == Owner::Comp)
+                && p.hits > 0
+                && p.ptype.is_naval()
+                && p.hits < p.ptype.max_hits()
+                && !self.moved_this_turn.contains(&p.id)
+                && self.cities.iter().any(|c| c.loc == p.loc && c.owner == p.owner)
+            {
+                p.hits += 1;
+            }
+        }
+        self.moved_this_turn.clear();
+
         for (idx, p) in self.pieces.iter_mut().enumerate() {
             if p.owner == Owner::Player || p.owner == Owner::Comp {
-                // Every unit starts a new turn with its full movement allowance;
-                // unspent moves from the previous turn do not carry over (or get lost).
-                p.moves_left = p.ptype.max_moves();
-
-                let at_friendly_city = self.cities.iter().any(|c| c.loc == p.loc && c.owner == p.owner);
-                if at_friendly_city && matches!(p.activity, UnitActivity::Sentry | UnitActivity::Fill | UnitActivity::TransportWait | UnitActivity::Upgrade) {
-                    if p.hits < p.ptype.max_hits() {
-                        p.hits += 1;
-                    }
-                }
+                // Every unit starts a new turn with its full movement allowance (scaled down
+                // for damage, as in the original); unspent moves do not carry over.
+                p.moves_left = p.ptype.moves_for_hits(p.hits);
             }
 
             if p.owner == Owner::Player {
@@ -1802,7 +1826,7 @@ impl Game {
 
         if cargo_count >= max_cargo {
             self.pieces[piece_idx].activity = UnitActivity::Idle;
-            self.pieces[piece_idx].moves_left = self.pieces[piece_idx].ptype.max_moves();
+            self.pieces[piece_idx].moves_left = self.pieces[piece_idx].ptype.moves_for_hits(self.pieces[piece_idx].hits);
             self.log(format!("{:?} is fully loaded with {} units and woke up.", ptype, cargo_count));
         } else {
             self.pieces[piece_idx].moves_left = 0;
@@ -1819,13 +1843,13 @@ impl Game {
 
         if at_owned_city {
             if p_hits < max_h {
-                let new_hits = (p_hits + 1).min(max_h);
-                self.pieces[piece_idx].hits = new_hits;
+                // Waiting in port: the hit itself is restored at the turn boundary by the
+                // general repair rule (a boat that stays put in its own port heals one hit).
                 self.pieces[piece_idx].moves_left = 0;
-                self.log(format!("{:?} docked at ({},{}) repaired to {}/{} hits.", ptype, p_loc.r, p_loc.c, new_hits, max_h));
+                self.log(format!("{:?} docked at ({},{}) is under repair ({}/{} hits).", ptype, p_loc.r, p_loc.c, p_hits, max_h));
             } else {
                 self.pieces[piece_idx].activity = UnitActivity::Idle;
-                self.pieces[piece_idx].moves_left = ptype.max_moves();
+                self.pieces[piece_idx].moves_left = ptype.moves_for_hits(p_hits);
                 self.log(format!("{:?} fully repaired at ({},{}) and woke up.", ptype, p_loc.r, p_loc.c));
             }
             return;
@@ -1902,7 +1926,7 @@ impl Game {
         for mut unit in self.pieces[piece_idx].cargo.drain(..) {
             unit.loc = t_loc;
             unit.activity = UnitActivity::Idle; 
-            unit.moves_left = unit.ptype.max_moves(); 
+            unit.moves_left = unit.ptype.moves_for_hits(unit.hits);
             awakened_units.push(unit);
         }
         
@@ -1922,7 +1946,7 @@ impl Game {
                 .unwrap_or_else(|| self.default_orders.iter().find(|(p, _)| *p == ptype).map(|(_, a)| *a).unwrap_or(UnitActivity::Idle));
 
             self.pieces[piece_idx].activity = assigned_order;
-            self.pieces[piece_idx].moves_left = ptype.max_moves();
+            self.pieces[piece_idx].moves_left = ptype.moves_for_hits(self.pieces[piece_idx].hits);
             if ptype == PieceType::Fighter {
                 self.pieces[piece_idx].fuel = 32;
                 self.log(format!("Fighter landed at ({},{}) refueled and assigned {:?}.", p_loc.r, p_loc.c, assigned_order));
