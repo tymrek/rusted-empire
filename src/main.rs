@@ -29,7 +29,11 @@ fn main() -> ExitCode {
             }
         },
     };
-    let opts = app::Options { load_file: value_of(&["--load", "-l"]), seed };
+    let opts = app::Options {
+        load_file: value_of(&["--load", "-l"]),
+        seed,
+        torus: args.iter().any(|a| a == "-t" || a == "--torus"),
+    };
 
     match app::run(opts) {
         Ok(()) => ExitCode::SUCCESS,

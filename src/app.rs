@@ -18,6 +18,9 @@ pub struct Options {
     pub load_file: Option<String>,
     /// `--seed N`: make a new game reproducible.
     pub seed: Option<u64>,
+    /// `-t` / `--torus`: the playable map wraps around at its edges. Only applies to a new
+    /// game; a loaded game keeps the topology it was saved with, as in the original.
+    pub torus: bool,
 }
 
 fn prompt_quit_confirmation(game: &Game) -> bool {
@@ -188,6 +191,7 @@ fn start_session(opts: Options) -> io::Result<Option<(Game, i32)>> {
             Some(seed) => Game::with_seed(60, 100, difficulty, seed),
             None => Game::new(60, 100, difficulty),
         };
+        g.torus = opts.torus;
         g.setup_initial_states();
 
         let starting_player_cities: Vec<usize> = g.cities.iter().enumerate()
@@ -222,13 +226,11 @@ fn edit_mode_step(game: &mut Game) -> io::Result<bool> {
                         game.last_mouse_coord = None;
                     }
                     crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                        let mut current = game.viewport_center.unwrap_or(game.edit_cursor);
+                        let current = game.viewport_center.unwrap_or(game.edit_cursor);
                         if let Some((last_c, last_r)) = game.last_mouse_coord {
                             let dc = mouse.column as i32 - last_c as i32;
                             let dr = mouse.row as i32 - last_r as i32;
-                            current.c = (current.c as i32 - dc).clamp(0, game.cols as i32 - 1) as usize;
-                            current.r = (current.r as i32 - dr).clamp(0, game.rows as i32 - 1) as usize;
-                            game.viewport_center = Some(current);
+                            game.viewport_center = Some(game.shift_cursor(current, -dr, -dc));
                         }
                         game.last_mouse_coord = Some((mouse.column, mouse.row));
                     }
@@ -402,14 +404,14 @@ fn edit_mode_step(game: &mut Game) -> io::Result<bool> {
                                                         break;
                                                     } else {
                                                         match dk.code {
-                                                            KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
-                                                            KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
-                                                            KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
-                                                            KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
-                                                            KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                            KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                                                            KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                            KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                                                            KeyCode::Char('8') | KeyCode::Up => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, 0),
+                                                            KeyCode::Char('2') | KeyCode::Down => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, 0),
+                                                            KeyCode::Char('4') | KeyCode::Left => game.edit_cursor = game.shift_cursor(game.edit_cursor, 0, -1),
+                                                            KeyCode::Char('6') | KeyCode::Right => game.edit_cursor = game.shift_cursor(game.edit_cursor, 0, 1),
+                                                            KeyCode::Char('7') => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, -1),
+                                                            KeyCode::Char('9') => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, 1),
+                                                            KeyCode::Char('1') => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, -1),
+                                                            KeyCode::Char('3') => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, 1),
                                                             _ => {}
                                                         }
                                                     }
@@ -575,14 +577,14 @@ fn edit_mode_step(game: &mut Game) -> io::Result<bool> {
                                                             break;
                                                         } else {
                                                             match dk.code {
-                                                                KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
-                                                                KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
-                                                                KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
-                                                                KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
-                                                                KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                                KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                                                                KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                                KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                                                                KeyCode::Char('8') | KeyCode::Up => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, 0),
+                                                                KeyCode::Char('2') | KeyCode::Down => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, 0),
+                                                                KeyCode::Char('4') | KeyCode::Left => game.edit_cursor = game.shift_cursor(game.edit_cursor, 0, -1),
+                                                                KeyCode::Char('6') | KeyCode::Right => game.edit_cursor = game.shift_cursor(game.edit_cursor, 0, 1),
+                                                                KeyCode::Char('7') => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, -1),
+                                                                KeyCode::Char('9') => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, 1),
+                                                                KeyCode::Char('1') => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, -1),
+                                                                KeyCode::Char('3') => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, 1),
                                                                 _ => {}
                                                             }
                                                         }
@@ -692,14 +694,14 @@ fn edit_mode_step(game: &mut Game) -> io::Result<bool> {
                             game.log(String::from("Order update cancelled."));
                         }
                     }
-                    KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
-                    KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
-                    KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
-                    KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
-                    KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                    KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                    KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                    KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                    KeyCode::Char('8') | KeyCode::Up => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, 0),
+                    KeyCode::Char('2') | KeyCode::Down => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, 0),
+                    KeyCode::Char('4') | KeyCode::Left => game.edit_cursor = game.shift_cursor(game.edit_cursor, 0, -1),
+                    KeyCode::Char('6') | KeyCode::Right => game.edit_cursor = game.shift_cursor(game.edit_cursor, 0, 1),
+                    KeyCode::Char('7') => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, -1),
+                    KeyCode::Char('9') => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, 1),
+                    KeyCode::Char('1') => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, -1),
+                    KeyCode::Char('3') => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, 1),
                     _ => {}
                 }
             }
@@ -745,13 +747,11 @@ fn handle_mouse(game: &mut Game, mouse: crossterm::event::MouseEvent, fallback_c
             game.last_mouse_coord = None;
         }
         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-            let mut current = game.viewport_center.unwrap_or(fallback_center);
+            let current = game.viewport_center.unwrap_or(fallback_center);
             if let Some((last_c, last_r)) = game.last_mouse_coord {
                 let dc = mouse.column as i32 - last_c as i32;
                 let dr = mouse.row as i32 - last_r as i32;
-                current.c = (current.c as i32 - dc).clamp(0, game.cols as i32 - 1) as usize;
-                current.r = (current.r as i32 - dr).clamp(0, game.rows as i32 - 1) as usize;
-                game.viewport_center = Some(current);
+                game.viewport_center = Some(game.shift_cursor(current, -dr, -dc));
             }
             game.last_mouse_coord = Some((mouse.column, mouse.row));
         }
@@ -1035,14 +1035,14 @@ fn manual_move(game: &mut Game, piece_idx: usize, mut was_auto: bool, observer_m
                                             break;
                                         } else {
                                             match k.code {
-                                                KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
-                                                KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
-                                                KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
-                                                KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
-                                                KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                                                KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                                                KeyCode::Char('8') | KeyCode::Up => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, 0),
+                                                KeyCode::Char('2') | KeyCode::Down => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, 0),
+                                                KeyCode::Char('4') | KeyCode::Left => game.edit_cursor = game.shift_cursor(game.edit_cursor, 0, -1),
+                                                KeyCode::Char('6') | KeyCode::Right => game.edit_cursor = game.shift_cursor(game.edit_cursor, 0, 1),
+                                                KeyCode::Char('7') => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, -1),
+                                                KeyCode::Char('9') => game.edit_cursor = game.shift_cursor(game.edit_cursor, -1, 1),
+                                                KeyCode::Char('1') => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, -1),
+                                                KeyCode::Char('3') => game.edit_cursor = game.shift_cursor(game.edit_cursor, 1, 1),
                                                 _ => {}
                                             }
                                         }
@@ -1174,11 +1174,7 @@ fn manual_move(game: &mut Game, piece_idx: usize, mut was_auto: bool, observer_m
                     };
 
                     if is_move {
-                        let target_r = (loc.r as i32 + dr_val) as usize;
-                        let target_c = (loc.c as i32 + dc_val) as usize;
-
-                        if target_r < game.rows && target_c < game.cols {
-                            let target_loc = Loc { r: target_r, c: target_c };
+                        if let Some(target_loc) = game.step(loc, (dr_val, dc_val)) {
 
                             let mut proceed = true;
                             if ptype == PieceType::Army {

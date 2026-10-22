@@ -9,6 +9,39 @@ const WATER_RATIO: usize = 70;
 const SMOOTH_PASSES: usize = 5;
 const MAX_HEIGHT: usize = 999;
 
+/// Maps a coordinate onto the playable interior (`1..=len-2`) of a wrapping axis.
+fn wrap_axis(v: i64, len: usize) -> i64 {
+    let n = len as i64 - 2;
+    if v >= 1 && v <= n { v } else { (v - 1).rem_euclid(n) + 1 }
+}
+
+/// `loc` moved by (`dr`, `dc`), or `None` if that is off the map. On a torus map (`-t`),
+/// stepping into the border ring lands on the opposite playable edge instead.
+fn geo_offset(torus: bool, rows: usize, cols: usize, loc: Loc, dr: i32, dc: i32) -> Option<Loc> {
+    let (mut r, mut c) = (loc.r as i64 + dr as i64, loc.c as i64 + dc as i64);
+    if torus && rows > 2 && cols > 2 {
+        r = wrap_axis(r, rows);
+        c = wrap_axis(c, cols);
+    }
+    if r < 0 || c < 0 || r >= rows as i64 || c >= cols as i64 {
+        None
+    } else {
+        Some(Loc { r: r as usize, c: c as usize })
+    }
+}
+
+/// The original game's `dist()`: the larger of the row and column distances, each taking
+/// the shorter way round on a torus map.
+fn geo_dist(torus: bool, rows: usize, cols: usize, a: Loc, b: Loc) -> i32 {
+    let mut dr = (a.r as i32 - b.r as i32).abs();
+    let mut dc = (a.c as i32 - b.c as i32).abs();
+    if torus {
+        dr = dr.min(rows as i32 - 2 - dr);
+        dc = dc.min(cols as i32 - 2 - dc);
+    }
+    dr.max(dc)
+}
+
 fn fresh_rng() -> StdRng {
     StdRng::from_entropy()
 }
@@ -59,6 +92,9 @@ pub struct Game {
     /// in its own port that did not move this turn repairs one hit, as in the original.
     #[serde(default)]
     pub moved_this_turn: std::collections::HashSet<usize>,
+    /// `-t`: the playable map wraps around at its top, bottom, left and right edges.
+    #[serde(default)]
+    pub torus: bool,
 }
 
 impl Game {
@@ -89,6 +125,7 @@ impl Game {
             next_id: 1,
             rng: fresh_rng(),
             moved_this_turn: std::collections::HashSet::new(),
+            torus: false,
             default_orders: vec![
                 (PieceType::Army, UnitActivity::Idle),
                 (PieceType::Fighter, UnitActivity::Idle),
@@ -206,13 +243,13 @@ impl Game {
         let mut min_dist: Option<i32> = None;
         for city in &self.cities {
             if city.owner == Owner::Player {
-                let dist = loc.dist(&city.loc);
+                let dist = self.dist(loc, city.loc);
                 min_dist = Some(min_dist.unwrap_or(dist).min(dist));
             }
         }
         for piece in &self.pieces {
             if piece.owner == Owner::Player && piece.ptype == PieceType::Carrier && piece.hits > 0 {
-                let dist = loc.dist(&piece.loc);
+                let dist = self.dist(loc, piece.loc);
                 min_dist = Some(min_dist.unwrap_or(dist).min(dist));
             }
         }
@@ -232,7 +269,7 @@ impl Game {
 
         for p in &self.pieces {
             if p.owner == viewer && p.hits > 0 {
-                let dist = p.loc.dist(&target.loc);
+                let dist = self.dist(p.loc, target.loc);
 
                 if p.ptype == PieceType::Destroyer {
                     if dist <= p.ptype.sight_range() { return true; }
@@ -243,25 +280,49 @@ impl Game {
         }
         for c in &self.cities {
             if c.owner == viewer {
-                if c.loc.dist(&target.loc) <= 1 { return true; }
+                if self.dist(c.loc, target.loc) <= 1 { return true; }
             }
         }
         false
     }
 
-    /// The up-to-8 in-bounds tiles surrounding `loc` (not including `loc` itself).
+    /// `loc` moved by (`dr`, `dc`), wrapping across the seams on a torus map.
+    /// `None` if the result is off the map.
+    pub fn offset(&self, loc: Loc, dr: i32, dc: i32) -> Option<Loc> {
+        geo_offset(self.torus, self.rows, self.cols, loc, dr, dc)
+    }
+
+    /// One step in direction `dir` (a `(row, col)` delta), with wrapping.
+    pub fn step(&self, loc: Loc, dir: (i32, i32)) -> Option<Loc> {
+        self.offset(loc, dir.0, dir.1)
+    }
+
+    /// Distance between two squares as the original game measures it (see `geo_dist`).
+    pub fn dist(&self, a: Loc, b: Loc) -> i32 {
+        geo_dist(self.torus, self.rows, self.cols, a, b)
+    }
+
+    /// The up-to-8 squares surrounding `loc` (not including `loc` itself); across the
+    /// seams on a torus map.
     pub fn neighbors(&self, loc: Loc) -> impl Iterator<Item = Loc> {
-        let (rows, cols) = (self.rows as i32, self.cols as i32);
+        let (torus, rows, cols) = (self.torus, self.rows, self.cols);
         (-1i32..=1).flat_map(move |dr| (-1i32..=1).map(move |dc| (dr, dc)))
             .filter(|&d| d != (0, 0))
-            .filter_map(move |(dr, dc)| {
-                let (nr, nc) = (loc.r as i32 + dr, loc.c as i32 + dc);
-                if nr >= 0 && nr < rows && nc >= 0 && nc < cols {
-                    Some(Loc { r: nr as usize, c: nc as usize })
-                } else {
-                    None
-                }
-            })
+            .filter_map(move |(dr, dc)| geo_offset(torus, rows, cols, loc, dr, dc))
+            .filter(move |&n| n != loc)
+    }
+
+    /// Moves a cursor or view centre by (`dr`, `dc`): clamped to the map normally,
+    /// wrapping on a torus map.
+    pub fn shift_cursor(&self, loc: Loc, dr: i32, dc: i32) -> Loc {
+        if self.torus {
+            self.offset(loc, dr, dc).unwrap_or(loc)
+        } else {
+            Loc {
+                r: (loc.r as i32 + dr).clamp(0, self.rows as i32 - 1) as usize,
+                c: (loc.c as i32 + dc).clamp(0, self.cols as i32 - 1) as usize,
+            }
+        }
     }
 
     pub fn is_land(&self, loc: Loc) -> bool {
@@ -300,6 +361,7 @@ impl Game {
     /// starts at the square root of the expected land per city and is reduced by one each
     /// time the candidates run out, so the full number of cities is always placed.
     pub(crate) fn place_cities(&mut self, land: &[Loc], count: usize) -> Vec<Loc> {
+        let (torus, rows, cols) = (self.torus, self.rows, self.cols);
         let playable = (self.rows - 2) * (self.cols - 2);
         let expected_land = playable - playable * WATER_RATIO / 100;
         let mut min_dist = ((expected_land / count.max(1)) as f64).sqrt() as i32;
@@ -311,7 +373,7 @@ impl Game {
                     min_dist -= 1;
                 }
                 candidates = land.iter().cloned()
-                    .filter(|l| !placed.contains(l) && placed.iter().all(|p| p.dist(l) >= min_dist))
+                    .filter(|l| !placed.contains(l) && placed.iter().all(|p| geo_dist(torus, rows, cols, *p, *l) >= min_dist))
                     .collect();
                 if candidates.is_empty() {
                     break; // no land left at all
@@ -320,7 +382,7 @@ impl Game {
             }
             let loc = candidates.swap_remove(self.rng.gen_range(0..candidates.len()));
             placed.push(loc);
-            candidates.retain(|l| loc.dist(l) >= min_dist);
+            candidates.retain(|l| geo_dist(torus, rows, cols, loc, *l) >= min_dist);
         }
         placed
     }
@@ -929,10 +991,9 @@ impl Game {
 
             let mut valid_steps = Vec::new();
             for &dir in &dirs {
-                let target_r = (current_loc.r as i32 + dir.0) as usize;
-                let target_c = (current_loc.c as i32 + dir.1) as usize;
+                let (target_r, target_c, target_in_map) = match self.step(current_loc, dir) { Some(l) => (l.r, l.c, true), None => (0, 0, false) };
 
-                if target_r < self.rows && target_c < self.cols {
+                if target_in_map {
                     let is_land = self.map[target_r][target_c] == Terrain::Land;
                     let can_enter = match ptype {
                         PieceType::Army => is_land,
@@ -976,10 +1037,9 @@ impl Game {
                 }
 
                 for &dir in &dirs {
-                    let target_r = (loc.r as i32 + dir.0) as usize;
-                    let target_c = (loc.c as i32 + dir.1) as usize;
+                    let (target_r, target_c, target_in_map) = match self.step(loc, dir) { Some(l) => (l.r, l.c, true), None => (0, 0, false) };
 
-                    if target_r < self.rows && target_c < self.cols {
+                    if target_in_map {
                         if !visited[target_r][target_c] {
                             let is_land = self.map[target_r][target_c] == Terrain::Land;
                             let can_enter = match ptype {
@@ -1073,11 +1133,7 @@ impl Game {
         // 3. Flood Fill the Distances (The Wave)
         while let Some((r, c, d)) = attack_queue.pop_front() {
             for &(dr, dc) in &dirs {
-                let nr = r as i32 + dr;
-                let nc = c as i32 + dc;
-                if nr >= 0 && nr < self.rows as i32 && nc >= 0 && nc < self.cols as i32 {
-                    let nr = nr as usize;
-                    let nc = nc as usize;
+                if let Some(Loc { r: nr, c: nc }) = self.offset(Loc { r, c }, dr, dc) {
                     if attack_map[nr][nc] > d + 1 {
                         attack_map[nr][nc] = d + 1;
                         attack_queue.push_back((nr, nc, d + 1));
@@ -1088,11 +1144,7 @@ impl Game {
 
         while let Some((r, c, d)) = ferry_queue.pop_front() {
             for &(dr, dc) in &dirs {
-                let nr = r as i32 + dr;
-                let nc = c as i32 + dc;
-                if nr >= 0 && nr < self.rows as i32 && nc >= 0 && nc < self.cols as i32 {
-                    let nr = nr as usize;
-                    let nc = nc as usize;
+                if let Some(Loc { r: nr, c: nc }) = self.offset(Loc { r, c }, dr, dc) {
                     if ferry_map[nr][nc] > d + 1 {
                         ferry_map[nr][nc] = d + 1;
                         ferry_queue.push_back((nr, nc, d + 1));
@@ -1127,10 +1179,7 @@ impl Game {
                 let mut wiggle_steps = Vec::new();
 
                 for &dir in &dirs {
-                    let tr = p_loc.r as i32 + dir.0;
-                    let tc = p_loc.c as i32 + dir.1;
-                    if tr >= 0 && tr < self.rows as i32 && tc >= 0 && tc < self.cols as i32 {
-                        let next_loc = Loc { r: tr as usize, c: tc as usize };
+                    if let Some(next_loc) = self.step(p_loc, dir) {
                         if visited.contains(&next_loc) { continue; }
 
                         let is_land = self.map[next_loc.r][next_loc.c] == Terrain::Land;
@@ -1204,10 +1253,7 @@ impl Game {
                 let mut should_unload = false;
                 for dr in -1..=1 {
                     for dc in -1..=1 {
-                        let r = p.loc.r as i32 + dr;
-                        let c = p.loc.c as i32 + dc;
-                        if r >= 0 && r < self.rows as i32 && c >= 0 && c < self.cols as i32 {
-                            let loc_rc = Loc { r: r as usize, c: c as usize };
+                        if let Some(loc_rc) = self.offset(p.loc, dr, dc) {
                             if self.map[loc_rc.r][loc_rc.c] == Terrain::Land {
                                 let near_enemy_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner != Owner::Comp);
                                 let near_friendly_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner == Owner::Comp);
@@ -1332,6 +1378,7 @@ impl Game {
             .map(|(_, p)| p.loc)
             .collect();
 
+        let (torus_flag, rows_n, cols_n) = (self.torus, self.rows, self.cols);
         // End of the previous turn: a damaged boat that sat in its own port without ever
         // moving repairs one hit (original rule; applies to both sides).
         for p in self.pieces.iter_mut() {
@@ -1362,7 +1409,7 @@ impl Game {
                     
                     for &eloc in &enemy_locs {
                         // Same distance as everywhere else in the game (the original dist()).
-                        if eloc.dist(&p.loc) <= sight {
+                        if geo_dist(torus_flag, rows_n, cols_n, eloc, p.loc) <= sight {
                             should_wake = true;
                             break;
                         }
@@ -1485,10 +1532,9 @@ impl Game {
 
             let mut valid_steps = Vec::new();
             for &dir in &dirs {
-                let target_r = (current_loc.r as i32 + dir.0) as usize;
-                let target_c = (current_loc.c as i32 + dir.1) as usize;
+                let (target_r, target_c, target_in_map) = match self.step(current_loc, dir) { Some(l) => (l.r, l.c, true), None => (0, 0, false) };
 
-                if target_r < self.rows && target_c < self.cols {
+                if target_in_map {
                     let is_land = self.map[target_r][target_c] == Terrain::Land;
                     let can_enter = match p.ptype {
                         PieceType::Army => is_land,
@@ -1540,10 +1586,9 @@ impl Game {
                 }
 
                 for &dir in &dirs {
-                    let target_r = (loc.r as i32 + dir.0) as usize;
-                    let target_c = (loc.c as i32 + dir.1) as usize;
+                    let (target_r, target_c, target_in_map) = match self.step(loc, dir) { Some(l) => (l.r, l.c, true), None => (0, 0, false) };
 
-                    if target_r < self.rows && target_c < self.cols {
+                    if target_in_map {
                         if !visited[target_r][target_c] {
                             let is_land = self.map[target_r][target_c] == Terrain::Land;
                             let can_enter = match p.ptype {
@@ -1601,10 +1646,9 @@ impl Game {
 
             let mut valid_steps = Vec::new();
             for &dir in &dirs {
-                let target_r = (current_loc.r as i32 + dir.0) as usize;
-                let target_c = (current_loc.c as i32 + dir.1) as usize;
+                let (target_r, target_c, target_in_map) = match self.step(current_loc, dir) { Some(l) => (l.r, l.c, true), None => (0, 0, false) };
 
-                if target_r < self.rows && target_c < self.cols {
+                if target_in_map {
                     let is_land = self.map[target_r][target_c] == Terrain::Land;
                     let can_enter = match ptype {
                         PieceType::Army => is_land,
@@ -1680,10 +1724,9 @@ impl Game {
             let mut valid_steps = Vec::new();
 
             for &dir in &dirs {
-                let r = (current_loc.r as i32 + dir.0) as usize;
-                let c = (current_loc.c as i32 + dir.1) as usize;
+                let (r, c, in_map) = match self.step(current_loc, dir) { Some(l) => (l.r, l.c, true), None => (0, 0, false) };
 
-                if r < self.rows && c < self.cols {
+                if in_map {
                     let step_loc = Loc { r, c };
                     let is_land = self.map[r][c] == Terrain::Land;
                     let friendly_city = self.cities.iter().any(|ct| ct.loc == step_loc && ct.owner == Owner::Player);
@@ -1727,10 +1770,9 @@ impl Game {
                 }
 
                 for &dir in &dirs {
-                    let r = (loc.r as i32 + dir.0) as usize;
-                    let c = (loc.c as i32 + dir.1) as usize;
+                    let (r, c, in_map) = match self.step(loc, dir) { Some(l) => (l.r, l.c, true), None => (0, 0, false) };
 
-                    if r < self.rows && c < self.cols && !visited[r][c] {
+                    if in_map && !visited[r][c] {
                         let is_land = self.map[r][c] == Terrain::Land;
                         let friendly_city = self.cities.iter().any(|ct| ct.loc == Loc { r, c } && ct.owner == Owner::Player);
                         let can_enter = match ptype {
@@ -1798,10 +1840,14 @@ impl Game {
                 }
             }
 
-            let target_r = current_loc.r as i32 + dr;
-            let target_c = current_loc.c as i32 + dc;
+            // Satellites keep their normal behaviour on a torus map: they do not wrap.
+            let target_step = if ptype == PieceType::Satellite {
+                geo_offset(false, self.rows, self.cols, current_loc, dr, dc)
+            } else {
+                self.offset(current_loc, dr, dc)
+            };
 
-            if target_r < 0 || target_r >= self.rows as i32 || target_c < 0 || target_c >= self.cols as i32 {
+            if target_step.is_none() {
                 if ptype == PieceType::Satellite {
                     self.pieces[piece_idx].hits = 0;
                     self.pieces[piece_idx].moves_left = 0;
@@ -1812,7 +1858,7 @@ impl Game {
                 break; // Leave moves_left > 0 so the TUI can pick it up
             }
 
-            let target_loc = Loc { r: target_r as usize, c: target_c as usize };
+            let target_loc = target_step.unwrap();
             let is_land = self.map[target_loc.r][target_loc.c] == Terrain::Land;
             let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
             
@@ -1861,10 +1907,8 @@ impl Game {
     pub fn reveal_vision(&mut self, loc: Loc, range: i32) {
         for dr in -range..=range {
             for dc in -range..=range {
-                let nr = (loc.r as i32 + dr) as usize;
-                let nc = (loc.c as i32 + dc) as usize;
-                if nr < self.rows && nc < self.cols {
-                    self.player_map[nr][nc] = 1;
+                if let Some(l) = self.offset(loc, dr, dc) {
+                    self.player_map[l.r][l.c] = 1;
                 }
             }
         }
@@ -1931,10 +1975,10 @@ impl Game {
         }
 
         let mut closest_loc = owned_city_locs[0];
-        let mut min_dist = p_loc.dist(&closest_loc);
+        let mut min_dist = self.dist(p_loc, closest_loc);
 
         for &cloc in &owned_city_locs {
-            let dist = p_loc.dist(&cloc);
+            let dist = self.dist(p_loc, cloc);
             if dist < min_dist {
                 min_dist = dist;
                 closest_loc = cloc;
@@ -1956,7 +2000,7 @@ impl Game {
         let mut target_transport = None;
         for (i, other) in self.pieces.iter().enumerate() {
             if other.owner == Owner::Player && other.ptype == PieceType::Transport && other.cargo.len() < 6 {
-                if loc.dist(&other.loc) <= 1 {
+                if self.dist(loc, other.loc) <= 1 {
                     target_transport = Some(i);
                     break;
                 }
@@ -2056,10 +2100,10 @@ impl Game {
         }
         
         let mut closest_loc = valid_targets[0];
-        let mut min_dist = p_loc.dist(&closest_loc);
+        let mut min_dist = self.dist(p_loc, closest_loc);
         
         for &loc in &valid_targets[1..] {
-            let dist = p_loc.dist(&loc);
+            let dist = self.dist(p_loc, loc);
             if dist < min_dist {
                 min_dist = dist;
                 closest_loc = loc;

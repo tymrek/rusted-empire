@@ -1589,11 +1589,12 @@ mod tests {
 
     #[test]
     fn test_loc_dist_is_the_larger_axis_difference() {
+        let game = Game::new(10, 10, 50);
         let a = Loc { r: 2, c: 3 };
-        assert_eq!(a.dist(&Loc { r: 2, c: 3 }), 0);
-        assert_eq!(a.dist(&Loc { r: 5, c: 4 }), 3);
-        assert_eq!(a.dist(&Loc { r: 0, c: 9 }), 6);
-        assert_eq!(Loc { r: 9, c: 0 }.dist(&Loc { r: 0, c: 9 }), 9, "symmetric, diagonals cost one");
+        assert_eq!(game.dist(a, Loc { r: 2, c: 3 }), 0);
+        assert_eq!(game.dist(a, Loc { r: 5, c: 4 }), 3);
+        assert_eq!(game.dist(a, Loc { r: 0, c: 9 }), 6);
+        assert_eq!(game.dist(Loc { r: 9, c: 0 }, Loc { r: 0, c: 9 }), 9, "symmetric, diagonals cost one");
     }
 
     /// Two own cities where Euclidean and move-distance disagree about which is nearer:
@@ -1858,7 +1859,7 @@ mod tests {
         assert_eq!(sites.len(), 20);
         for (i, a) in sites.iter().enumerate() {
             for b in sites.iter().skip(i + 1) {
-                assert!(a.dist(b) >= 9, "{:?} and {:?}", a, b);
+                assert!(game.dist(*a, *b) >= 9, "{:?} and {:?}", a, b);
             }
         }
     }
@@ -1874,5 +1875,149 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), 30, "no square used twice");
+    }
+
+    // ---- -t: torus maps ----
+
+    fn torus_game(rows: usize, cols: usize) -> Game {
+        let mut game = Game::new(rows, cols, 50);
+        game.torus = true;
+        game.map = vec![vec![Terrain::Sea; cols]; rows];
+        game
+    }
+
+    #[test]
+    fn test_torus_steps_wrap_across_the_seams_but_flat_maps_do_not() {
+        let game = torus_game(10, 12);
+        // playable squares are rows 1..=8 and columns 1..=10
+        assert_eq!(game.step(Loc { r: 5, c: 10 }, (0, 1)), Some(Loc { r: 5, c: 1 }));
+        assert_eq!(game.step(Loc { r: 5, c: 1 }, (0, -1)), Some(Loc { r: 5, c: 10 }));
+        assert_eq!(game.step(Loc { r: 1, c: 4 }, (-1, 0)), Some(Loc { r: 8, c: 4 }));
+        assert_eq!(game.step(Loc { r: 8, c: 4 }, (1, 0)), Some(Loc { r: 1, c: 4 }));
+        assert_eq!(game.step(Loc { r: 1, c: 1 }, (-1, -1)), Some(Loc { r: 8, c: 10 }));
+        assert_eq!(game.step(Loc { r: 5, c: 5 }, (1, 1)), Some(Loc { r: 6, c: 6 }));
+        let flat = Game::new(10, 12, 50);
+        assert_eq!(flat.step(Loc { r: 5, c: 10 }, (0, 1)), Some(Loc { r: 5, c: 11 }));
+    }
+
+    #[test]
+    fn test_torus_distance_takes_the_short_way_round() {
+        let mut game = torus_game(20, 30);
+        assert_eq!(game.dist(Loc { r: 5, c: 1 }, Loc { r: 5, c: 28 }), 1);
+        assert_eq!(game.dist(Loc { r: 1, c: 5 }, Loc { r: 18, c: 5 }), 1);
+        assert_eq!(game.dist(Loc { r: 2, c: 2 }, Loc { r: 5, c: 6 }), 4);
+        game.torus = false;
+        assert_eq!(game.dist(Loc { r: 5, c: 1 }, Loc { r: 5, c: 28 }), 27);
+    }
+
+    #[test]
+    fn test_torus_neighbours_cross_the_seams() {
+        let mut game = torus_game(10, 12);
+        let around: Vec<Loc> = game.neighbors(Loc { r: 1, c: 1 }).collect();
+        assert_eq!(around.len(), 8);
+        assert!(around.contains(&Loc { r: 8, c: 10 }), "diagonal across the corner seam");
+        assert!(around.contains(&Loc { r: 8, c: 1 }) && around.contains(&Loc { r: 1, c: 10 }));
+        assert!(around.iter().all(|l| l.r >= 1 && l.r <= 8 && l.c >= 1 && l.c <= 10), "never the border ring");
+        // coastline is seen across a seam
+        game.map = vec![vec![Terrain::Land; 12]; 10];
+        assert!(!game.is_coastal(Loc { r: 5, c: 1 }));
+        game.map[5][10] = Terrain::Sea;
+        assert!(game.is_coastal(Loc { r: 5, c: 1 }));
+    }
+
+    #[test]
+    fn test_ship_sails_across_the_seam() {
+        let mut game = torus_game(10, 12);
+        game.pieces.push(test_piece(1, PieceType::Destroyer, Owner::Player, 5, 10));
+        game.pieces[0].moves_left = 2;
+        let target = game.step(Loc { r: 5, c: 10 }, (0, 1)).unwrap();
+        let (result, _) = game.attempt_move(0, target);
+        assert_eq!(result, MoveResult::Moved);
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 1 });
+    }
+
+    #[test]
+    fn test_directed_ship_keeps_going_around_the_world() {
+        let mut game = torus_game(10, 12);
+        let mut ship = test_piece(1, PieceType::PatrolBoat, Owner::Player, 5, 9);
+        ship.activity = UnitActivity::Dir(0, 1);
+        ship.moves_left = 4;
+        game.pieces.push(ship);
+        game.dir_piece(0);
+        // 9 -> 10 -> (seam) 1 -> 2 -> 3
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 3 });
+    }
+
+    #[test]
+    fn test_satellites_do_not_wrap_on_a_torus() {
+        let mut game = torus_game(10, 12);
+        let mut sat = test_piece(1, PieceType::Satellite, Owner::Player, 5, 11);
+        sat.activity = UnitActivity::Dir(0, 1);
+        sat.moves_left = 10;
+        sat.fuel = 20;
+        game.pieces.push(sat);
+        game.dir_piece(0);
+        assert!(game.pieces[0].hits <= 0, "a satellite leaving the board is lost, torus or not");
+    }
+
+    #[test]
+    fn test_torus_view_wraps_and_never_shows_the_border() {
+        use crate::disp::view_axes;
+        let game = torus_game(20, 30);
+        let (rows, cols) = view_axes(&game, Loc { r: 1, c: 1 }, 6, 8);
+        assert_eq!((rows.len(), cols.len()), (6, 8));
+        assert_eq!(rows, vec![16, 17, 18, 1, 2, 3]);
+        assert_eq!(cols, vec![25, 26, 27, 28, 1, 2, 3, 4]);
+        assert!(rows.iter().all(|&r| (1..=18).contains(&r)) && cols.iter().all(|&c| (1..=28).contains(&c)));
+        // a view larger than the world is limited to the playable size
+        let (rows, cols) = view_axes(&game, Loc { r: 5, c: 5 }, 100, 100);
+        assert_eq!((rows.len(), cols.len()), (18, 28));
+        let mut unique = rows.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 18, "no row is drawn twice");
+    }
+
+    #[test]
+    fn test_flat_view_is_unchanged() {
+        use crate::disp::view_axes;
+        let game = Game::new(20, 30, 50);
+        let (rows, cols) = view_axes(&game, Loc { r: 0, c: 0 }, 6, 8);
+        assert_eq!(rows, (0..6).collect::<Vec<_>>());
+        assert_eq!(cols, (0..8).collect::<Vec<_>>());
+        let (rows, _) = view_axes(&game, Loc { r: 19, c: 5 }, 6, 8);
+        assert_eq!(rows, (14..20).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_cursor_wraps_on_a_torus_and_clamps_otherwise() {
+        let mut game = torus_game(10, 12);
+        assert_eq!(game.shift_cursor(Loc { r: 1, c: 1 }, -1, -1), Loc { r: 8, c: 10 });
+        game.torus = false;
+        assert_eq!(game.shift_cursor(Loc { r: 0, c: 0 }, -1, -1), Loc { r: 0, c: 0 });
+    }
+
+    #[test]
+    fn test_torus_world_gets_all_its_cities_with_wrapped_spacing() {
+        let mut game = Game::with_seed(60, 100, 50, 4);
+        game.torus = true;
+        game.setup_initial_states();
+        assert_eq!(game.cities.len(), 6000 / 85);
+        let mut unique: Vec<_> = game.cities.iter().map(|c| c.loc).collect();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), game.cities.len());
+        assert!(game.cities.iter().all(|c| (1..=58).contains(&c.loc.r) && (1..=98).contains(&c.loc.c)));
+    }
+
+    #[test]
+    fn test_torus_flag_is_saved_and_restored() {
+        let mut game = torus_game(10, 12);
+        game.torus = true;
+        let path = scratch_path("torus.sav");
+        game.save_game(path.to_str().unwrap()).unwrap();
+        let loaded = Game::load_game(path.to_str().unwrap()).unwrap();
+        assert!(loaded.torus);
+        let _ = std::fs::remove_file(path);
     }
 }

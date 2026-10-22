@@ -161,16 +161,6 @@ pub struct Loc {
     pub c: usize,
 }
 
-impl Loc {
-    /// Distance in moves for an 8-direction mover: the larger of the row and column
-    /// differences (the original game's `dist()`). Every distance in the game uses this.
-    pub fn dist(&self, other: &Loc) -> i32 {
-        let dr = (self.r as i32 - other.r as i32).abs();
-        let dc = (self.c as i32 - other.c as i32).abs();
-        dr.max(dc)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum UnitActivity {
     Idle,          
