@@ -98,19 +98,32 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         for &r in &row_coords { in_rows[r] = true; }
         for &c in &col_coords { in_cols[c] = true; }
 
-        let mut viewport_pieces = HashMap::new();
+        // Fog of war as in the original: the player's own units are always shown; enemy
+        // units and city owners are shown live only where the player can see right now,
+        // and elsewhere as last seen.
+        let sight = game.player_sight();
+        let mut viewport_pieces: HashMap<Loc, (u8, Owner)> = HashMap::new();
         for (i, p) in game.pieces.iter().enumerate() {
-            if in_rows[p.loc.r] && in_cols[p.loc.c] {
-                if game.is_visible_to(i, Owner::Player) {
-                    viewport_pieces.entry(p.loc).or_insert(p); 
+            if p.hits > 0 && in_rows[p.loc.r] && in_cols[p.loc.c] && game.is_visible_with(i, Owner::Player, Some(&sight)) {
+                viewport_pieces.entry(p.loc).or_insert((Game::unit_char(p.ptype, p.owner), p.owner));
+            }
+        }
+        for &r in &row_coords {
+            for &c in &col_coords {
+                let loc = Loc { r, c };
+                let remembered = game.player_view.get(r).and_then(|row| row.get(c)).copied().unwrap_or(0);
+                if remembered != 0 && !sight[r][c] && !viewport_pieces.contains_key(&loc) {
+                    viewport_pieces.insert(loc, (remembered, Owner::Comp));
                 }
             }
         }
 
-        let mut viewport_cities = HashMap::new();
+        let mut viewport_cities: HashMap<Loc, Owner> = HashMap::new();
         for city in game.cities.iter() {
             if in_rows[city.loc.r] && in_cols[city.loc.c] {
-                viewport_cities.entry(city.loc).or_insert(city);
+                if let Some(owner) = game.known_city_owner(city, Some(&sight)) {
+                    viewport_cities.entry(city.loc).or_insert(owner);
+                }
             }
         }
 
@@ -135,21 +148,13 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                 let is_blink_off = is_blink_target && !active_blink.unwrap().1;
 
                 let piece_opt = viewport_pieces.get(&loc).copied();
-                if let Some(p) = piece_opt {
+                if let Some((ch, owner)) = piece_opt {
                     if !is_blink_off {
-                        let ch_str = match p.ptype {
-                            PieceType::Army => if p.owner == Owner::Player { "A" } else { "a" },
-                            PieceType::Fighter => if p.owner == Owner::Player { "F" } else { "f" },
-                            PieceType::PatrolBoat => if p.owner == Owner::Player { "P" } else { "p" },
-                            PieceType::Destroyer => if p.owner == Owner::Player { "D" } else { "d" },
-                            PieceType::Submarine => if p.owner == Owner::Player { "S" } else { "s" },
-                            PieceType::Carrier => if p.owner == Owner::Player { "C" } else { "c" },
-                            PieceType::Battleship => if p.owner == Owner::Player { "B" } else { "b" },
-                            PieceType::Transport => if p.owner == Owner::Player { "T" } else { "t" },
-                            PieceType::Satellite => if p.owner == Owner::Player { "Z" } else { "z" },
-                        };
-
-                        let color = if p.owner == Owner::Player { Color::Cyan } else { Color::LightRed };
+                        let ch_str = (ch as char).to_string();
+                        // Units remembered from out of sight are drawn dimmer than live ones.
+                        let color = if owner == Owner::Player { Color::Cyan }
+                                    else if sight[r][c] { Color::LightRed }
+                                    else { Color::Red };
                         let mut style = Style::default().fg(color).add_modifier(Modifier::BOLD);
                         if is_blink_target { style = style.bg(Color::White).fg(Color::Black); }
                         spans.push(Span::styled(ch_str, style));
@@ -158,15 +163,15 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                 }
 
                 let city_opt = viewport_cities.get(&loc).copied();
-                if let Some(city) = city_opt {
+                if let Some(city_owner) = city_opt {
                     if !(is_blink_off && piece_opt.is_none()) {
-                        let ch_str = match city.owner {
+                        let ch_str = match city_owner {
                             Owner::Player => "O",
                             Owner::Comp => "X",
                             Owner::Neutral => "*",
                         };
 
-                        let color = match city.owner {
+                        let color = match city_owner {
                             Owner::Player => Color::Green,
                             Owner::Comp => Color::Red,
                             Owner::Neutral => Color::Yellow,
@@ -198,14 +203,14 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
 
         let player_armies = game.pieces.iter().filter(|p| p.owner == Owner::Player && p.ptype == PieceType::Army).count();
         let player_cities = game.cities.iter().filter(|c| c.owner == Owner::Player).count();
-        let enemy_cities = game.cities.iter().filter(|c| c.owner == Owner::Comp).count();
+        let enemy_cities = game.cities.iter().filter(|c| game.known_city_owner(c, Some(&sight)) == Some(Owner::Comp)).count();
 let mut sidebar_lines = vec![
             Line::from(Span::styled("--- STATUS ---", Style::default().fg(Color::Yellow))),
             Line::from(format!(" My Score: {}", game.player_score)),
             Line::from(format!(" Enemy Score: {}", game.comp_score)),
             Line::from(format!(" Armies: {}", player_armies)),
             Line::from(format!(" My Cities: {}", player_cities)),
-            Line::from(format!(" Enemy Cities: {}", enemy_cities)),
+            Line::from(format!(" Enemy Cities (known): {}", enemy_cities)),
             Line::from(""),
         ];
 
@@ -217,8 +222,12 @@ let mut sidebar_lines = vec![
                 let terrain = if game.map[loc.r][loc.c] == Terrain::Land { "Land" } else { "Sea" };
                 sidebar_lines.push(Line::from(format!(" Terrain: {}", terrain)));
 
-                if let Some(city) = game.cities.iter().find(|c| c.loc == loc) {
-                    let owner_str = match city.owner { Owner::Player => "Player", Owner::Comp => "Enemy", Owner::Neutral => "Neutral" };
+                if let Some(city) = game.cities.iter().find(|c| c.loc == loc && game.known_city_owner(c, Some(&sight)).is_some()) {
+                    let owner_str = match game.known_city_owner(city, Some(&sight)) {
+                        Some(Owner::Player) => "Player",
+                        Some(Owner::Comp) => "Enemy",
+                        _ => "Neutral",
+                    };
                     sidebar_lines.push(Line::from(format!(" City: {}", owner_str)));
                     if city.owner == Owner::Player {
                         sidebar_lines.push(Line::from(format!(" Prod: {:?} ({}/{})", city.prod, city.work, city.prod.build_cost())));
@@ -239,7 +248,7 @@ let mut sidebar_lines = vec![
                 }
                 
                 let visible_pieces: Vec<_> = game.pieces.iter().enumerate()
-                    .filter(|(i, p)| p.loc == loc && p.hits > 0 && game.is_visible_to(*i, Owner::Player))
+                    .filter(|(i, p)| p.loc == loc && p.hits > 0 && game.is_visible_with(*i, Owner::Player, Some(&sight)))
                     .map(|(_, p)| p)
                     .collect();
 
@@ -270,9 +279,9 @@ let mut sidebar_lines = vec![
                 sidebar_lines.push(Line::from(format!(" Hits: {}/{}", piece.hits, piece.ptype.max_hits())));
                 sidebar_lines.push(Line::from(format!(" Moves: {}/{}", piece.moves_left, piece.ptype.max_moves())));
                 if piece.ptype == PieceType::Fighter {
-                    sidebar_lines.push(Line::from(format!(" Fuel: {}/32", piece.fuel)));
+                    sidebar_lines.push(Line::from(format!(" Fuel: {}/{}", piece.fuel, crate::game::FIGHTER_FUEL)));
                 } else if piece.ptype == PieceType::Satellite {
-                    sidebar_lines.push(Line::from(format!(" Orbit: {}/20", piece.fuel)));
+                    sidebar_lines.push(Line::from(format!(" Orbit: {}/{} turns", piece.fuel, crate::game::SATELLITE_LIFE)));
                 }
                 if piece.ptype == PieceType::Transport || piece.ptype == PieceType::Carrier {
                     sidebar_lines.push(Line::from(format!(" Cargo: {} units", piece.cargo.len())));

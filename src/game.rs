@@ -42,6 +42,22 @@ fn geo_dist(torus: bool, rows: usize, cols: usize, a: Loc, b: Loc) -> i32 {
     dr.max(dc)
 }
 
+/// A fighter's fuel when full, in moves (the original's fighter range).
+pub const FIGHTER_FUEL: i32 = 32;
+/// A satellite's life in turns: the original's range of 500 moves at 10 moves a turn.
+pub const SATELLITE_LIFE: i32 = 50;
+/// The diagonals a satellite can travel (as `Dir` activities): NE, NW, SE, SW.
+pub const SAT_DIRS: [UnitActivity; 4] = [
+    UnitActivity::Dir(-1, 1), UnitActivity::Dir(-1, -1), UnitActivity::Dir(1, 1), UnitActivity::Dir(1, -1),
+];
+
+/// The work a city starts from when it switches to building `prod`: the original charges a
+/// fifth of the build time to retool (`work = -(build_time / 5)`), and progress on the
+/// old item is lost.
+pub fn retool_work(prod: PieceType) -> i32 {
+    -(prod.build_cost() / 5)
+}
+
 fn fresh_rng() -> StdRng {
     StdRng::from_entropy()
 }
@@ -49,7 +65,7 @@ fn fresh_rng() -> StdRng {
 /// Version of the save-file format written by this build. Bump it whenever a change to
 /// `Game` can't be handled by a `#[serde(default)]` on the new field, and add a
 /// migration step to `Game::migrate`. Saves from before versioning count as version 0.
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Game {
@@ -64,6 +80,14 @@ pub struct Game {
     pub map: Vec<Vec<Terrain>>,
     pub comp_map: Vec<Vec<u8>>,
     pub player_map: Vec<Vec<u8>>,
+    /// What the player last saw of enemy units on each square, as the unit's map letter
+    /// (lower case: the computer's); 0 means none seen there. Like the original's user view
+    /// map, it only changes when the square is in sight, so it can be out of date.
+    #[serde(default)]
+    pub player_view: Vec<Vec<u8>>,
+    /// Debug observer mode (`~`): the player sees everything, live.
+    #[serde(skip)]
+    pub omniscient: bool,
     pub cities: Vec<City>,
     pub pieces: Vec<Piece>,
     pub messages: Vec<String>,
@@ -102,6 +126,7 @@ impl Game {
         let map = vec![vec![Terrain::Sea; cols]; rows];
         let comp_map = vec![vec![0; cols]; rows];
         let player_map = vec![vec![0; cols]; rows];
+        let player_view = vec![vec![0; cols]; rows];
         Self {
             save_version: SAVE_VERSION,
             rows,
@@ -112,6 +137,8 @@ impl Game {
             map,
             comp_map,
             player_map,
+            player_view,
+            omniscient: false,
             cities: Vec::new(),
             pieces: Vec::new(),
             messages: Vec::new(),
@@ -149,6 +176,17 @@ impl Game {
 
     pub fn seed_rng(&mut self, seed: u64) {
         self.rng = StdRng::seed_from_u64(seed);
+    }
+
+    /// Sets what city `c_idx` builds. Changing production costs the retooling penalty
+    /// (`retool_work`), as does choosing production for a newly won city (`new_city`),
+    /// which starts from scratch whatever it was building before.
+    pub fn set_production(&mut self, c_idx: usize, prod: PieceType, new_city: bool) {
+        let city = &mut self.cities[c_idx];
+        if new_city || city.prod != prod {
+            city.work = retool_work(prod);
+        }
+        city.prod = prod;
     }
 
     /// Builds the land/water map the way the original game does: random heights, smoothed
@@ -328,13 +366,60 @@ impl Game {
         }
     }
 
+    /// Radius within which a player's city sees: its own square and the eight around it, as
+    /// in the original's scan of each city every turn.
+    pub const CITY_SIGHT: i32 = 1;
+
+    /// Which squares the player can see right now: within sight range of one of the
+    /// player's units, or next to one of the player's cities. (Everything, in debug
+    /// observer mode.)
+    pub fn player_sight(&self) -> Vec<Vec<bool>> {
+        let mut grid = vec![vec![self.omniscient; self.cols]; self.rows];
+        if self.omniscient {
+            return grid;
+        }
+        let centers = self.pieces.iter()
+            .filter(|p| p.owner == Owner::Player && p.hits > 0)
+            .map(|p| (p.loc, p.ptype.sight_range()))
+            .chain(self.cities.iter().filter(|c| c.owner == Owner::Player).map(|c| (c.loc, Self::CITY_SIGHT)));
+        for (loc, range) in centers {
+            for dr in -range..=range {
+                for dc in -range..=range {
+                    if let Some(l) = self.offset(loc, dr, dc) {
+                        grid[l.r][l.c] = true;
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    /// True if the player can see `loc` right now (see `player_sight`).
+    pub fn player_sees(&self, loc: Loc) -> bool {
+        self.omniscient
+            || self.pieces.iter().any(|p| p.owner == Owner::Player && p.hits > 0 && self.dist(p.loc, loc) <= p.ptype.sight_range())
+            || self.cities.iter().any(|c| c.owner == Owner::Player && self.dist(c.loc, loc) <= Self::CITY_SIGHT)
+    }
+
+    /// True if `viewer` can see the piece at `target_idx` right now. The player sees enemy
+    /// units only on squares in sight (and submarines only from next door, or from a
+    /// destroyer in range); the computer currently sees everything.
     pub fn is_visible_to(&self, target_idx: usize, viewer: Owner) -> bool {
+        self.is_visible_with(target_idx, viewer, None)
+    }
+
+    /// `is_visible_to`, with the player's sight grid already worked out (for loops).
+    pub fn is_visible_with(&self, target_idx: usize, viewer: Owner, sight: Option<&Vec<Vec<bool>>>) -> bool {
         let target = &self.pieces[target_idx];
         if target.owner == viewer { return true; }
+        if viewer == Owner::Player && self.omniscient { return true; }
         
         if target.ptype != PieceType::Submarine {
             if viewer == Owner::Player {
-                return self.player_map[target.loc.r][target.loc.c] != 0;
+                return match sight {
+                    Some(grid) => grid[target.loc.r][target.loc.c],
+                    None => self.player_sees(target.loc),
+                };
             }
             return true;
         }
@@ -496,7 +581,7 @@ impl Game {
 
             for loc in chosen_city_locs {
                 self.cities.push(City {
-                    loc, owner: Owner::Neutral, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+                    loc, owner: Owner::Neutral, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
                 });
             }
 
@@ -640,13 +725,17 @@ impl Game {
             city.work = 0;
             city.default_orders.clear();
             if unit_owner == Owner::Comp {
+                // A captured city starts from scratch, so even armies pay the retooling cost.
                 city.prod = PieceType::Army;
+                city.work = retool_work(PieceType::Army);
             }
 
             if is_player {
                 self.reveal_vision(loc, ptype.sight_range());
                 (MoveResult::CityCaptured(c_idx), format!(">>> CITY CAPTURED! You took ({},{})! <<<", loc.r, loc.c))
             } else if was_friendly {
+                // The player is told, so the map shows the loss even out of sight.
+                self.cities[c_idx].seen_owner = Some(unit_owner);
                 (MoveResult::CityCaptured(c_idx), format!(">>> ALERT! The enemy captured your city at ({},{})! <<<", loc.r, loc.c))
             } else {
                 (MoveResult::CityCaptured(c_idx), String::new())
@@ -853,7 +942,7 @@ impl Game {
             boarded_piece.loc = target_loc;
             boarded_piece.moves_left = 0;
             if ptype == PieceType::Fighter {
-                boarded_piece.fuel = 32;
+                boarded_piece.fuel = FIGHTER_FUEL;
             }
             self.pieces[carrier_idx].cargo.push(boarded_piece);
             self.pieces[piece_idx].hits = 0;
@@ -961,7 +1050,7 @@ impl Game {
 
                     if at_base || at_carrier {
                         // Landing refuels the fighter and ends its turn, as in the original.
-                        self.pieces[piece_idx].fuel = 32;
+                        self.pieces[piece_idx].fuel = FIGHTER_FUEL;
                         self.pieces[piece_idx].moves_left = 0;
                     } else if self.pieces[piece_idx].fuel <= 0 {
                         self.pieces[piece_idx].hits = 0;
@@ -1005,7 +1094,7 @@ impl Game {
             if at_base || at_carrier {
                 // Landing refuels the fighter and ends its turn, as in the original: no
                 // touch-and-go through a city to stretch its range.
-                self.pieces[piece_idx].fuel = 32;
+                self.pieces[piece_idx].fuel = FIGHTER_FUEL;
                 self.pieces[piece_idx].moves_left = 0;
             } else if self.pieces[piece_idx].fuel <= 0 {
                 self.pieces[piece_idx].hits = 0;
@@ -1226,7 +1315,7 @@ impl Game {
 
         // 4. Units Roll Downhill
         let comp_indices: Vec<usize> = self.pieces.iter().enumerate()
-            .filter(|(_, p)| p.owner == Owner::Comp && p.hits > 0)
+            .filter(|(_, p)| p.owner == Owner::Comp && p.hits > 0 && p.ptype != PieceType::Satellite)
             .map(|(i, _)| i)
             .collect();
 
@@ -1361,11 +1450,14 @@ impl Game {
                 continue;
             }
 
-            city.work += 1;
+            // As in the original (`work++ >= build_time`): the check uses the work done
+            // before this turn's increment, and any surplus carries over to the next unit.
             let cost = city.prod.build_cost();
+            let ready = city.work >= cost;
+            city.work += 1;
 
-            if city.work >= cost {
-                city.work = 0;
+            if ready {
+                city.work -= cost;
                 
                 if city.owner == Owner::Player {
                     logs_to_add.push(format!(
@@ -1394,13 +1486,19 @@ impl Game {
                     activity: starting_activity,
                     cargo: Vec::new(),
                     fuel: match city.prod {
-                        PieceType::Fighter => 32,
-                        PieceType::Satellite => 20, 
+                        PieceType::Fighter => FIGHTER_FUEL,
+                        PieceType::Satellite => SATELLITE_LIFE,
                         _ => 0,
                     },
                 });
+                if city.prod == PieceType::Satellite {
+                    // A new satellite heads off on a random diagonal (the original's sat_dir).
+                    let last = new_pieces.len() - 1;
+                    new_pieces[last].activity = SAT_DIRS[self.rng.gen_range(0..SAT_DIRS.len())];
+                }
 
                 if city.owner == Owner::Comp {
+                    let old_prod = city.prod;
                     let is_coastal = city_is_coastal[idx];
                     if is_coastal {
                         let roll = self.rng.gen_range(0..100);
@@ -1424,6 +1522,9 @@ impl Game {
                     } else {
                         city.prod = if self.rng.gen_bool(0.8) { PieceType::Army } else { PieceType::Fighter };
                     }
+                    if city.prod != old_prod {
+                        city.work = retool_work(city.prod);
+                    }
                 }
             }
         }
@@ -1444,8 +1545,9 @@ impl Game {
         let mut auto_land_indices = Vec::new();
         let mut wakeup_logs = Vec::new();
 
+        let sight = self.player_sight();
         let enemy_locs: Vec<Loc> = self.pieces.iter().enumerate()
-            .filter(|(i, p)| p.owner != Owner::Player && p.hits > 0 && self.is_visible_to(*i, Owner::Player))
+            .filter(|(i, p)| p.owner != Owner::Player && p.hits > 0 && self.is_visible_with(*i, Owner::Player, Some(&sight)))
             .map(|(_, p)| p.loc)
             .collect();
 
@@ -1472,7 +1574,8 @@ impl Game {
                 p.moves_left = p.ptype.moves_for_hits(p.hits);
             }
 
-            if p.owner == Owner::Player {
+            // Satellites take no orders: they fly themselves (`move_satellites`).
+            if p.owner == Owner::Player && p.ptype != PieceType::Satellite {
 
                 if p.activity == UnitActivity::Sentry {
                     let sight = p.ptype.sight_range();
@@ -1521,6 +1624,9 @@ impl Game {
             self.log(msg);
         }
 
+        // As in the original, satellites move before everything else.
+        self.move_satellites();
+
         for idx in auto_explore_indices {
             self.explore_piece(idx);
         }
@@ -1564,6 +1670,9 @@ impl Game {
         }
 
         self.pieces.retain(|p| p.hits > 0);
+
+        // The start of the player's turn: look around with every unit and city.
+        self.refresh_player_view();
     }
     pub fn attack_piece(&mut self, piece_idx: usize) {
         if self.pieces[piece_idx].owner != Owner::Player || self.pieces[piece_idx].hits <= 0 { return; }
@@ -1571,10 +1680,20 @@ impl Game {
         let mut attack_logs = Vec::new();
 
         while self.pieces[piece_idx].moves_left > 0 && self.pieces[piece_idx].hits > 0 {
-            let enemy_locs: Vec<Loc> = self.pieces.iter().enumerate()
-                .filter(|(i, p)| p.owner != Owner::Player && p.hits > 0 && self.is_visible_to(*i, Owner::Player))
+            // Targets are enemy units in sight now, plus where the player last saw others
+            // (the remembered view), as the original's attack orders work from the user's map.
+            let mut enemy_locs: Vec<Loc> = self.pieces.iter().enumerate()
+                .filter(|(i, p)| p.owner != Owner::Player && p.hits > 0 && p.ptype != PieceType::Satellite
+                    && self.is_visible_to(*i, Owner::Player))
                 .map(|(_, p)| p.loc)
                 .collect();
+            for (r, row) in self.player_view.iter().enumerate() {
+                for (c, &ch) in row.iter().enumerate() {
+                    if ch.is_ascii_lowercase() && ch != b'z' { // satellites can't be attacked
+                        enemy_locs.push(Loc { r, c });
+                    }
+                }
+            }
 
             let p = &self.pieces[piece_idx];
             let current_loc = p.loc;
@@ -1585,7 +1704,7 @@ impl Game {
             // are not targets; otherwise they would hover beside the city until out of fuel.
             let target_city_locs: Vec<Loc> = if ptype == PieceType::Army {
                 self.cities.iter()
-                    .filter(|c| c.owner != Owner::Player && self.player_map[c.loc.r][c.loc.c] != 0)
+                    .filter(|c| matches!(self.known_city_owner(c, None), Some(o) if o != Owner::Player))
                     .map(|c| c.loc)
                     .collect()
             } else {
@@ -1920,21 +2039,11 @@ impl Game {
                 }
             }
 
-            // Satellites keep their normal behaviour on a torus map: they do not wrap.
-            let target_step = if ptype == PieceType::Satellite {
-                geo_offset(false, self.rows, self.cols, current_loc, dr, dc)
-            } else {
-                self.offset(current_loc, dr, dc)
-            };
+            // (Satellites never come here: they fly themselves, see `move_satellites`.)
+            let target_step = self.offset(current_loc, dr, dc);
 
             if target_step.is_none() {
-                if ptype == PieceType::Satellite {
-                    self.pieces[piece_idx].hits = 0;
-                    self.pieces[piece_idx].moves_left = 0;
-                    dir_logs.push(String::from("Satellite flew out of orbit and was lost."));
-                } else {
-                    dir_logs.push(format!("{:?} reached the edge of the map. Halting for manual assist.", ptype));
-                }
+                dir_logs.push(format!("{:?} reached the edge of the map. Halting for manual assist.", ptype));
                 break; // Leave moves_left > 0 so the TUI can pick it up
             }
 
@@ -1947,7 +2056,7 @@ impl Game {
                 _ => !is_land || friendly_city,
             };
 
-            if ptype != PieceType::Satellite && ((!can_enter && ptype != PieceType::Fighter) || friendly_city || self.is_fatal_city_entry(ptype, Owner::Player, target_loc) || self.is_tile_blocked_by_friend(target_loc, ptype, Owner::Player)) {
+            if (!can_enter && ptype != PieceType::Fighter) || friendly_city || self.is_fatal_city_entry(ptype, Owner::Player, target_loc) || self.is_tile_blocked_by_friend(target_loc, ptype, Owner::Player) {
                 dir_logs.push(format!("{:?} hit an obstacle at ({},{}) and halted its march.", ptype, target_loc.r, target_loc.c));
                 break; // Leave moves_left > 0 so the TUI can pick it up
             }
@@ -1975,22 +2084,138 @@ impl Game {
             self.log(msg);
         }
     }
+    /// Flies every satellite its full speed along its diagonal, as the original's
+    /// `move_sat`: a satellite that would leave the playable map bounces off the edge.
+    /// Satellites never fight and never take orders; one without a diagonal heading (from
+    /// an older save) is given a random one.
+    pub fn move_satellites(&mut self) {
+        let (rows, cols) = (self.rows as i64, self.cols as i64);
+        let on_board = |r: i64, c: i64| r >= 1 && c >= 1 && r <= rows - 2 && c <= cols - 2;
+        for i in 0..self.pieces.len() {
+            if self.pieces[i].ptype != PieceType::Satellite || self.pieces[i].hits <= 0 {
+                continue;
+            }
+            if !SAT_DIRS.contains(&self.pieces[i].activity) {
+                self.pieces[i].activity = SAT_DIRS[self.rng.gen_range(0..SAT_DIRS.len())];
+            }
+            for _ in 0..PieceType::Satellite.max_moves() {
+                let UnitActivity::Dir(mut dr, mut dc) = self.pieces[i].activity else { break };
+                let loc = self.pieces[i].loc;
+                let (r, c) = (loc.r as i64, loc.c as i64);
+                if !on_board(r + dr as i64, c + dc as i64) {
+                    // The original's bounce(): flip east/west if that stays on the map,
+                    // else flip north/south if that does, else turn straight back.
+                    let (ndr, ndc) = [(dr, -dc), (-dr, dc)].into_iter()
+                        .find(|&(a, b)| on_board(r + a as i64, c + b as i64))
+                        .unwrap_or((-dr, -dc));
+                    dr = ndr;
+                    dc = ndc;
+                    self.pieces[i].activity = UnitActivity::Dir(dr, dc);
+                }
+                let (nr, nc) = (r + dr as i64, c + dc as i64);
+                if !on_board(nr, nc) {
+                    break; // a map too small to fly in
+                }
+                let new_loc = Loc { r: nr as usize, c: nc as usize };
+                self.pieces[i].loc = new_loc;
+                self.moved_this_turn.insert(self.pieces[i].id);
+                if self.pieces[i].owner == Owner::Player {
+                    self.reveal_vision(new_loc, PieceType::Satellite.sight_range());
+                }
+            }
+            self.pieces[i].moves_left = 0;
+        }
+    }
+
     pub fn reveal_entire_map(&mut self) {
         for r in 0..self.rows {
             for c in 0..self.cols {
                 self.player_map[r][c] = 1;
             }
         }
+        self.omniscient = true;
         self.log(String::from("Observer mode active. Map completely revealed."));
     }
 
+    /// The player looks at every square within `range` of `loc`: the squares become
+    /// explored, and what is seen there (enemy units, city owners) is remembered.
     pub fn reveal_vision(&mut self, loc: Loc, range: i32) {
-        for dr in -range..=range {
-            for dc in -range..=range {
-                if let Some(l) = self.offset(loc, dr, dc) {
-                    self.player_map[l.r][l.c] = 1;
+        self.scan_for_player(&[(loc, range)]);
+    }
+
+    /// Re-scans everything the player can see right now (all units and cities). Called at
+    /// the start of each player turn, like the original's scans of every user piece.
+    pub fn refresh_player_view(&mut self) {
+        let mut centers: Vec<(Loc, i32)> = self.pieces.iter()
+            .filter(|p| p.owner == Owner::Player && p.hits > 0)
+            .map(|p| (p.loc, p.ptype.sight_range()))
+            .collect();
+        centers.extend(self.cities.iter().filter(|c| c.owner == Owner::Player).map(|c| (c.loc, Self::CITY_SIGHT)));
+        self.scan_for_player(&centers);
+    }
+
+    /// The map letter for a unit as the player sees it (upper case: the player's).
+    pub fn unit_char(ptype: PieceType, owner: Owner) -> u8 {
+        let ch = match ptype {
+            PieceType::Army => b'A',
+            PieceType::Fighter => b'F',
+            PieceType::PatrolBoat => b'P',
+            PieceType::Destroyer => b'D',
+            PieceType::Submarine => b'S',
+            PieceType::Carrier => b'C',
+            PieceType::Battleship => b'B',
+            PieceType::Transport => b'T',
+            PieceType::Satellite => b'Z',
+        };
+        if owner == Owner::Player { ch } else { ch.to_ascii_lowercase() }
+    }
+
+    fn scan_for_player(&mut self, centers: &[(Loc, i32)]) {
+        if self.player_view.len() != self.rows || self.player_view.iter().any(|r| r.len() != self.cols) {
+            self.player_view = vec![vec![0; self.cols]; self.rows];
+        }
+        let mut squares = std::collections::HashSet::new();
+        for &(loc, range) in centers {
+            for dr in -range..=range {
+                for dc in -range..=range {
+                    if let Some(l) = self.offset(loc, dr, dc) {
+                        squares.insert(l);
+                    }
                 }
             }
+        }
+        // The enemy unit the player would see on each square (the first one listed, as
+        // the display shows). Submarines only show up if detected.
+        let mut seen_units: std::collections::HashMap<Loc, u8> = std::collections::HashMap::new();
+        for (i, p) in self.pieces.iter().enumerate() {
+            if p.owner != Owner::Player && p.hits > 0 && squares.contains(&p.loc)
+                && (p.ptype != PieceType::Submarine || self.is_visible_to(i, Owner::Player))
+            {
+                seen_units.entry(p.loc).or_insert(Self::unit_char(p.ptype, p.owner));
+            }
+        }
+        for &l in &squares {
+            self.player_map[l.r][l.c] = 1;
+            self.player_view[l.r][l.c] = seen_units.get(&l).copied().unwrap_or(0);
+        }
+        for city in self.cities.iter_mut() {
+            if squares.contains(&city.loc) {
+                city.seen_owner = Some(city.owner);
+            }
+        }
+    }
+
+    /// The owner of `city` as the player knows it: the truth if it is the player's or in
+    /// sight, otherwise what the player saw last (`None` if never seen).
+    pub fn known_city_owner(&self, city: &City, sight: Option<&Vec<Vec<bool>>>) -> Option<Owner> {
+        let in_sight = match sight {
+            Some(grid) => grid[city.loc.r][city.loc.c],
+            None => self.player_sees(city.loc),
+        };
+        if city.owner == Owner::Player || in_sight || self.omniscient {
+            Some(city.owner)
+        } else {
+            city.seen_owner
         }
     }
 
@@ -2132,7 +2357,7 @@ impl Game {
             self.pieces[piece_idx].activity = assigned_order;
             self.pieces[piece_idx].moves_left = ptype.moves_for_hits(self.pieces[piece_idx].hits);
             if ptype == PieceType::Fighter {
-                self.pieces[piece_idx].fuel = 32;
+                self.pieces[piece_idx].fuel = FIGHTER_FUEL;
                 self.log(format!("Fighter landed at ({},{}) refueled and assigned {:?}.", p_loc.r, p_loc.c, assigned_order));
             } else {
                 self.log(format!("{:?} docked at ({},{}) and assigned {:?}.", ptype, p_loc.r, p_loc.c, assigned_order));
@@ -2145,7 +2370,7 @@ impl Game {
                 let mut boarded_piece = self.pieces[piece_idx].clone();
                 boarded_piece.moves_left = 0;
                 boarded_piece.activity = UnitActivity::Sentry; 
-                boarded_piece.fuel = 32; // Refuel upon docking
+                boarded_piece.fuel = FIGHTER_FUEL; // Refuel upon docking
                 self.pieces[carrier_idx].cargo.push(boarded_piece);
                 self.pieces[piece_idx].hits = 0; // Mark original hovering fighter for engine cleanup
                 self.log(format!("Fighter at ({},{}) immediately landed on the carrier below it.", p_loc.r, p_loc.c));
@@ -2257,6 +2482,17 @@ impl Game {
     /// Brings a save from an older format up to `SAVE_VERSION`. Version 0 (saves written
     /// before versioning) needs nothing beyond the field defaults.
     fn migrate(&mut self) {
+        if self.save_version < 2 {
+            // Version 2 added the player's remembered view (fog of war). Start it from what
+            // the player can see now, and from the true owners of cities already explored.
+            self.player_view = vec![vec![0; self.cols]; self.rows];
+            for city in self.cities.iter_mut() {
+                if self.player_map.get(city.loc.r).and_then(|r| r.get(city.loc.c)).copied().unwrap_or(0) != 0 {
+                    city.seen_owner = Some(city.owner);
+                }
+            }
+            self.refresh_player_view();
+        }
         self.save_version = SAVE_VERSION;
     }
 
@@ -2265,7 +2501,7 @@ impl Game {
         let grid_ok = |g: &Vec<Vec<u8>>| g.len() == self.rows && g.iter().all(|r| r.len() == self.cols);
         if self.rows == 0 || self.cols == 0
             || self.map.len() != self.rows || self.map.iter().any(|r| r.len() != self.cols)
-            || !grid_ok(&self.comp_map) || !grid_ok(&self.player_map)
+            || !grid_ok(&self.comp_map) || !grid_ok(&self.player_map) || !grid_ok(&self.player_view)
         {
             return Err(String::from("map sizes do not match the stated dimensions"));
         }

@@ -226,4 +226,8 @@ pub struct City {
     pub work: i32,
     #[serde(default)]
     pub default_orders: Vec<(PieceType, UnitActivity)>,
+    /// Who the player last saw holding this city (`None`: never seen). See
+    /// `Game::known_city_owner`.
+    #[serde(default)]
+    pub seen_owner: Option<Owner>,
 }

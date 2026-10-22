@@ -39,7 +39,9 @@ fn prompt_quit_confirmation(game: &Game) -> bool {
     }
 }
 
-fn prompt_city_production(game: &mut Game, city_idx: usize) {
+/// Asks what city `city_idx` should build. `new_city` is true for a city just won (or the
+/// starting city): it starts from scratch, so it pays the retooling cost whatever is chosen.
+fn prompt_city_production(game: &mut Game, city_idx: usize, new_city: bool) {
     game.viewport_center = None;
     let city_loc = game.cities[city_idx].loc;
     let prompt_msg = format!(
@@ -58,6 +60,10 @@ fn prompt_city_production(game: &mut Game, city_idx: usize) {
         if event::poll(Duration::from_millis(50)).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
                 if key.code == KeyCode::Esc {
+                    if new_city {
+                        let prod = game.cities[city_idx].prod;
+                        game.set_production(city_idx, prod, true);
+                    }
                     game.log(format!("Production unchanged for City at ({},{}).", city_loc.r, city_loc.c));
                     break;
                 }
@@ -81,7 +87,7 @@ fn prompt_city_production(game: &mut Game, city_idx: usize) {
                         if prod.is_naval() && !coastal {
                             game.log(format!("City at ({},{}) is landlocked! Cannot build {:?}. Try again.", city_loc.r, city_loc.c, prod));
                         } else {
-                            game.cities[city_idx].prod = prod;
+                            game.set_production(city_idx, prod, new_city);
                             game.log(format!("City at ({},{}) assigned to build: {:?}", city_loc.r, city_loc.c, prod));
                             break;
                         }
@@ -200,7 +206,7 @@ fn start_session(opts: Options) -> io::Result<Option<(Game, i32)>> {
             .collect();
 
         for idx in starting_player_cities {
-            prompt_city_production(&mut g, idx);
+            prompt_city_production(&mut g, idx, true);
         }
         g
     };
@@ -259,7 +265,7 @@ fn edit_mode_step(game: &mut Game) -> io::Result<bool> {
                     }
                     KeyCode::Char('p') | KeyCode::Char('P') => {
                         if let Some(c_idx) = game.cities.iter().position(|c| c.loc == game.edit_cursor && c.owner == Owner::Player) {
-                            prompt_city_production(game, c_idx);
+                            prompt_city_production(game, c_idx, false);
                         } else {
                             game.log(String::from("No player-owned city at cursor location."));
                         }
@@ -297,7 +303,7 @@ fn edit_mode_step(game: &mut Game) -> io::Result<bool> {
                             let mut woke = 0;
                             let mut cargo_carriers = Vec::new();
                             for (i, p) in game.pieces.iter_mut().enumerate() {
-                                if p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0 {
+                                if p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0 && p.ptype != PieceType::Satellite {
                                     if wake_all || Some(p.ptype) == target_ptype {
                                         if p.activity != UnitActivity::Idle {
                                             p.activity = UnitActivity::Idle;
@@ -337,7 +343,7 @@ fn edit_mode_step(game: &mut Game) -> io::Result<bool> {
                         }
                     }
                     KeyCode::Char('o') | KeyCode::Char('O') => {
-                        if let Some(p_idx) = game.pieces.iter().position(|p| p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0) {
+                        if let Some(p_idx) = game.pieces.iter().position(|p| p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0 && p.ptype != PieceType::Satellite) {
                             let ptype = game.pieces[p_idx].ptype;
 
                             let mut opts = vec!["[S]entry", "[Y]attack", "[G]rope", "[D]est", "[R]nd", "[V]ctr", "[W]ake"];
@@ -725,6 +731,7 @@ enum Flow {
 /// A unit that needs manual input: idle, or on standing orders but stuck with moves left.
 fn awaiting_manual(p: &models::Piece) -> bool {
     if p.owner != Owner::Player || p.moves_left <= 0 || p.hits <= 0 { return false; }
+    if p.ptype == PieceType::Satellite { return false; } // satellites fly themselves
     matches!(p.activity, UnitActivity::Idle | UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dir(_, _) | UnitActivity::Dest(_) | UnitActivity::Land)
 }
 
@@ -1212,7 +1219,7 @@ fn manual_move(game: &mut Game, piece_idx: usize, mut was_auto: bool, observer_m
                             }
 
                             if let MoveResult::CityCaptured(c_idx) = result {
-                                prompt_city_production(game, c_idx);
+                                prompt_city_production(game, c_idx, true);
                             }
 
                         } else {
@@ -1347,9 +1354,9 @@ fn play(mut game: Game, autosave_interval: i32) -> io::Result<()> {
 
         if let Some(c_idx) = game.pending_cities.pop() {
             if observer_mode {
-                game.cities[c_idx].prod = PieceType::Army;
+                game.set_production(c_idx, PieceType::Army, true);
             } else {
-                prompt_city_production(&mut game, c_idx);
+                prompt_city_production(&mut game, c_idx, true);
             }
             continue;
         }
