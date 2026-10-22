@@ -16,23 +16,18 @@ mod tests {
         game.setup_initial_states();
         
         let expected_target = (120 * 240) / 85;
-        assert!(game.cities.len() <= expected_target);
-        assert!(game.cities.len() > expected_target - 40, "City count was lower than expected target constraints");
+        // Like the original, the full number of cities is always placed (spacing relaxes if needed).
+        assert_eq!(game.cities.len(), expected_target);
     }
 
     #[test]
-    fn test_city_distance_enforcement() {
+    fn test_cities_never_share_a_square() {
         let mut game = Game::new(120, 240, 50);
         game.setup_initial_states();
-
-        for (i, city_a) in game.cities.iter().enumerate() {
-            for (j, city_b) in game.cities.iter().enumerate() {
-                if i != j {
-                    let dr = (city_a.loc.r as isize - city_b.loc.r as isize).abs();
-                    let dc = (city_a.loc.c as isize - city_b.loc.c as isize).abs();
-                    let dist = dr.max(dc);
-                    assert!(dist >= 6, "Cities spawned too close: {:?} and {:?}", city_a.loc, city_b.loc);
-                }
+        for (i, a) in game.cities.iter().enumerate() {
+            for b in game.cities.iter().skip(i + 1) {
+                assert_ne!(a.loc, b.loc, "two cities on one square");
+                assert!(game.map[a.loc.r][a.loc.c] == Terrain::Land);
             }
         }
     }
@@ -1784,5 +1779,100 @@ mod tests {
         game.save_game(path.to_str().unwrap()).unwrap();
         assert!(Game::load_game(path.to_str().unwrap()).unwrap_err().contains("outside the map"));
         let _ = std::fs::remove_file(path);
+    }
+
+    // ---- map generation: original algorithm ----
+
+    fn land_masses(map: &Vec<Vec<Terrain>>) -> Vec<usize> {
+        let (rows, cols) = (map.len(), map[0].len());
+        let mut seen = vec![vec![false; cols]; rows];
+        let mut sizes = Vec::new();
+        for r in 0..rows {
+            for c in 0..cols {
+                if map[r][c] != Terrain::Land || seen[r][c] { continue; }
+                let (mut stack, mut n) = (vec![(r, c)], 0);
+                seen[r][c] = true;
+                while let Some((a, b)) = stack.pop() {
+                    n += 1;
+                    for dr in -1i32..=1 {
+                        for dc in -1i32..=1 {
+                            let (x, y) = (a as i32 + dr, b as i32 + dc);
+                            if x < 0 || y < 0 || x as usize >= rows || y as usize >= cols { continue; }
+                            let (x, y) = (x as usize, y as usize);
+                            if map[x][y] == Terrain::Land && !seen[x][y] {
+                                seen[x][y] = true;
+                                stack.push((x, y));
+                            }
+                        }
+                    }
+                }
+                sizes.push(n);
+            }
+        }
+        sizes.sort_by(|a, b| b.cmp(a));
+        sizes
+    }
+
+    #[test]
+    fn test_map_is_exactly_thirty_percent_land_with_a_sea_border() {
+        for seed in 0..12 {
+            for (rows, cols) in [(60, 100), (40, 80), (120, 240)] {
+                let mut game = Game::with_seed(rows, cols, 50, seed);
+                game.generate_map();
+                let playable = (rows - 2) * (cols - 2);
+                let land = (1..rows - 1).flat_map(|r| (1..cols - 1).map(move |c| (r, c)))
+                    .filter(|&(r, c)| game.map[r][c] == Terrain::Land).count();
+                assert_eq!(land, playable - playable * 70 / 100, "seed {} {}x{}", seed, rows, cols);
+                assert!((0..rows).all(|r| game.map[r][0] == Terrain::Sea && game.map[r][cols - 1] == Terrain::Sea));
+                assert!((0..cols).all(|c| game.map[0][c] == Terrain::Sea && game.map[rows - 1][c] == Terrain::Sea));
+            }
+        }
+    }
+
+    #[test]
+    fn test_maps_have_several_land_masses_not_one_blob() {
+        for seed in 0..25 {
+            let mut game = Game::with_seed(60, 100, 50, seed);
+            game.generate_map();
+            let sizes = land_masses(&game.map);
+            let total: usize = sizes.iter().sum();
+            assert!(sizes[0] * 100 / total < 70, "seed {}: one land mass holds {}% of the land", seed, sizes[0] * 100 / total);
+            assert!(sizes.iter().filter(|&&s| s >= 50).count() >= 2, "seed {}: expected at least two real land masses", seed);
+        }
+    }
+
+    #[test]
+    fn test_same_seed_same_map() {
+        let (mut a, mut b) = (Game::with_seed(60, 100, 50, 9), Game::with_seed(60, 100, 50, 9));
+        a.generate_map();
+        b.generate_map();
+        assert_eq!(a.map, b.map);
+    }
+
+    #[test]
+    fn test_city_sites_respect_the_derived_minimum_distance() {
+        let mut game = Game::with_seed(60, 100, 50, 1);
+        let land: Vec<Loc> = (1..59).flat_map(|r| (1..99).map(move |c| Loc { r, c })).collect();
+        // expected land per city = (58*98*30/100)/20 = 85 -> minimum distance isqrt(85) = 9
+        let sites = game.place_cities(&land, 20);
+        assert_eq!(sites.len(), 20);
+        for (i, a) in sites.iter().enumerate() {
+            for b in sites.iter().skip(i + 1) {
+                assert!(a.dist(b) >= 9, "{:?} and {:?}", a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn test_city_spacing_relaxes_when_land_is_scarce_but_all_cities_are_placed() {
+        let mut game = Game::with_seed(60, 100, 50, 1);
+        // a 7x7 patch of land cannot hold 30 cities 4+ apart, so the spacing must loosen
+        let land: Vec<Loc> = (10..17).flat_map(|r| (10..17).map(move |c| Loc { r, c })).collect();
+        let sites = game.place_cities(&land, 30);
+        assert_eq!(sites.len(), 30);
+        let mut unique = sites.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 30, "no square used twice");
     }
 }
