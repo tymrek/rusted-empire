@@ -150,13 +150,13 @@ impl Game {
         let mut min_dist: Option<i32> = None;
         for city in &self.cities {
             if city.owner == Owner::Player {
-                let dist = (loc.r as i32 - city.loc.r as i32).abs().max((loc.c as i32 - city.loc.c as i32).abs());
+                let dist = loc.dist(&city.loc);
                 min_dist = Some(min_dist.unwrap_or(dist).min(dist));
             }
         }
         for piece in &self.pieces {
             if piece.owner == Owner::Player && piece.ptype == PieceType::Carrier && piece.hits > 0 {
-                let dist = (loc.r as i32 - piece.loc.r as i32).abs().max((loc.c as i32 - piece.loc.c as i32).abs());
+                let dist = loc.dist(&piece.loc);
                 min_dist = Some(min_dist.unwrap_or(dist).min(dist));
             }
         }
@@ -176,12 +176,10 @@ impl Game {
 
         for p in &self.pieces {
             if p.owner == viewer && p.hits > 0 {
-                let dr = (p.loc.r as isize - target.loc.r as isize).abs();
-                let dc = (p.loc.c as isize - target.loc.c as isize).abs();
-                let dist = std::cmp::max(dr, dc);
+                let dist = p.loc.dist(&target.loc);
 
                 if p.ptype == PieceType::Destroyer {
-                    if dist <= p.ptype.sight_range() as isize { return true; }
+                    if dist <= p.ptype.sight_range() { return true; }
                 } else {
                     if dist <= 1 { return true; }
                 }
@@ -189,10 +187,7 @@ impl Game {
         }
         for c in &self.cities {
             if c.owner == viewer {
-                let dr = (c.loc.r as isize - target.loc.r as isize).abs();
-                let dc = (c.loc.c as isize - target.loc.c as isize).abs();
-                let dist = std::cmp::max(dr, dc);
-                if dist <= 1 { return true; }
+                if c.loc.dist(&target.loc) <= 1 { return true; }
             }
         }
         false
@@ -282,9 +277,7 @@ impl Game {
                 if chosen_city_locs.len() >= target_cities { break; }
                 let mut too_close = false;
                 for &c_loc in &chosen_city_locs {
-                    let dr = (c_loc.r as isize - loc.r as isize).abs();
-                    let dc = (c_loc.c as isize - loc.c as isize).abs();
-                    if dr < 6 && dc < 6 { too_close = true; break; }
+                    if c_loc.dist(&loc) < 6 { too_close = true; break; }
                 }
                 if !too_close { chosen_city_locs.push(loc); }
             }
@@ -1292,12 +1285,12 @@ impl Game {
             if p.owner == Owner::Player {
 
                 if p.activity == UnitActivity::Sentry {
-                    let sight = p.ptype.sight_range() as f64;
+                    let sight = p.ptype.sight_range();
                     let mut should_wake = false;
                     
                     for &eloc in &enemy_locs {
-                        let dist = ((eloc.r as f64 - p.loc.r as f64).powi(2) + (eloc.c as f64 - p.loc.c as f64).powi(2)).sqrt();
-                        if dist <= sight {
+                        // Same distance as everywhere else in the game (the original dist()).
+                        if eloc.dist(&p.loc) <= sight {
                             should_wake = true;
                             break;
                         }
@@ -1866,10 +1859,10 @@ impl Game {
         }
 
         let mut closest_loc = owned_city_locs[0];
-        let mut min_dist = (p_loc.r as isize - closest_loc.r as isize).pow(2) + (p_loc.c as isize - closest_loc.c as isize).pow(2);
+        let mut min_dist = p_loc.dist(&closest_loc);
 
         for &cloc in &owned_city_locs {
-            let dist = (p_loc.r as isize - cloc.r as isize).pow(2) + (p_loc.c as isize - cloc.c as isize).pow(2);
+            let dist = p_loc.dist(&cloc);
             if dist < min_dist {
                 min_dist = dist;
                 closest_loc = cloc;
@@ -1891,9 +1884,7 @@ impl Game {
         let mut target_transport = None;
         for (i, other) in self.pieces.iter().enumerate() {
             if other.owner == Owner::Player && other.ptype == PieceType::Transport && other.cargo.len() < 6 {
-                let r_diff = (loc.r as isize - other.loc.r as isize).abs();
-                let c_diff = (loc.c as isize - other.loc.c as isize).abs();
-                if r_diff <= 1 && c_diff <= 1 {
+                if loc.dist(&other.loc) <= 1 {
                     target_transport = Some(i);
                     break;
                 }
@@ -1993,10 +1984,10 @@ impl Game {
         }
         
         let mut closest_loc = valid_targets[0];
-        let mut min_dist = (p_loc.r as isize - closest_loc.r as isize).pow(2) + (p_loc.c as isize - closest_loc.c as isize).pow(2);
+        let mut min_dist = p_loc.dist(&closest_loc);
         
         for &loc in &valid_targets[1..] {
-            let dist = (p_loc.r as isize - loc.r as isize).pow(2) + (p_loc.c as isize - loc.c as isize).pow(2);
+            let dist = p_loc.dist(&loc);
             if dist < min_dist {
                 min_dist = dist;
                 closest_loc = loc;
