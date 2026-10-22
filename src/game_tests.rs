@@ -2498,4 +2498,128 @@ mod tests {
         assert_eq!((st.landings, st.low_fuel_landings, st.out_of_fuel), (1, 1, 1));
         assert_eq!(game.fighter_stats[0], Default::default());
     }
+
+    // ---- starting cities and difficulty (the original's select_cities) ----
+
+    /// Three islands: A (rows 2-6, cols 2-8) with three shore cities, B (rows 2-6,
+    /// cols 15-20) with two, and C (rows 10-14, cols 2-9) with only one.
+    fn start_world() -> Game {
+        let mut game = Game::with_seed(20, 30, 0, 9);
+        game.map = vec![vec![Terrain::Sea; 30]; 20];
+        let mut land = |r0: usize, r1: usize, c0: usize, c1: usize| {
+            for r in r0..=r1 { for c in c0..=c1 { game.map[r][c] = Terrain::Land; } }
+        };
+        land(2, 6, 2, 8);
+        land(2, 6, 15, 20);
+        land(10, 14, 2, 9);
+        for (r, c) in [(2, 2), (6, 8), (2, 8), (2, 15), (6, 20), (12, 5)] {
+            game.cities.push(city(Loc { r, c }, Owner::Neutral));
+        }
+        game
+    }
+
+    #[test]
+    fn test_start_continents_need_two_cities_and_a_shore_city() {
+        let game = start_world();
+        let conts = game.start_continents();
+        assert_eq!(conts.len(), 2, "island C has only one city");
+        // A: (3 shore - 2) * 3 * 1000 + 35 squares; B: 0 + 30 squares
+        assert_eq!(conts[0].value, 3035);
+        assert_eq!(conts[1].value, 30);
+        assert_eq!(conts[0].cities.len(), 3);
+    }
+
+    #[test]
+    fn test_difficulty_levels_rank_continent_pairs_easiest_first() {
+        let game = start_world();
+        let pairs = game.start_pairs();
+        assert_eq!(pairs.len(), 4, "two continents: 2 x 2 pairs");
+        assert_eq!(pairs[0], (0, 1), "easiest: the player gets the better continent");
+        assert_eq!(pairs[3], (1, 0), "hardest: the computer does");
+        assert!(pairs[1..3].contains(&(0, 0)) && pairs[1..3].contains(&(1, 1)), "sharing a continent is in the middle");
+    }
+
+    #[test]
+    fn test_choose_start_gives_each_side_a_city_on_its_continent() {
+        for level in 0..4 {
+            let mut game = start_world();
+            game.choose_start(level);
+            let player = game.cities.iter().position(|c| c.owner == Owner::Player).unwrap();
+            let comp = game.cities.iter().position(|c| c.owner == Owner::Comp).unwrap();
+            assert_ne!(player, comp);
+            let on_a = |i: usize| i < 3;
+            let (want_p, want_c) = [(true, false), (true, true), (false, false), (false, true)][level];
+            if level == 0 || level == 3 {
+                assert_eq!((on_a(player), on_a(comp)), (want_p, want_c), "level {}", level);
+            } else {
+                assert_eq!(on_a(player), on_a(comp), "level {}: both on one continent", level);
+            }
+            assert_eq!(game.difficulty, level as u32);
+            assert_eq!(game.cities[comp].prod, PieceType::Army);
+        }
+    }
+
+    #[test]
+    fn test_generated_worlds_offer_a_square_number_of_levels() {
+        for seed in 1..=5 {
+            let mut game = Game::with_seed(60, 100, 0, seed);
+            let levels = game.generate_world();
+            let n = game.start_continents().len();
+            assert!(n >= 1 && n <= 10);
+            assert_eq!(levels, n * n);
+            game.choose_start(levels - 1);
+            assert_eq!(game.cities.iter().filter(|c| c.owner == Owner::Player).count(), 1);
+            assert_eq!(game.cities.iter().filter(|c| c.owner == Owner::Comp).count(), 1);
+        }
+    }
+
+    // ---- the computer acknowledging defeat (the original's check_endgame) ----
+
+    /// A world with `pc`/`cc` player/computer cities and `pa`/`ca` armies.
+    fn endgame_world(pc: usize, cc: usize, pa: usize, ca: usize) -> Game {
+        let mut game = Game::new(20, 20, 0);
+        let mut n = 0;
+        for (count, owner) in [(pc, Owner::Player), (cc, Owner::Comp)] {
+            for _ in 0..count {
+                game.cities.push(city(Loc { r: 1 + n / 18, c: 1 + n % 18 }, owner));
+                n += 1;
+            }
+        }
+        for (count, owner) in [(pa, Owner::Player), (ca, Owner::Comp)] {
+            for i in 0..count {
+                game.pieces.push(test_piece(100 + n + i, PieceType::Army, owner, 10, 10));
+            }
+            n += count;
+        }
+        game
+    }
+
+    #[test]
+    fn test_computer_resigns_when_down_to_a_third() {
+        assert!(endgame_world(9, 2, 9, 2).comp_should_resign());
+        assert!(!endgame_world(9, 3, 9, 2).comp_should_resign(), "3 cities is not under 9/3");
+        assert!(!endgame_world(9, 2, 9, 3).comp_should_resign(), "armies count too");
+        assert!(!endgame_world(8, 2, 8, 2).comp_should_resign(), "8/3 is 2 in whole numbers");
+        assert!(endgame_world(3, 0, 3, 0).comp_should_resign());
+    }
+
+    #[test]
+    fn test_armies_aboard_transports_count_for_resigning() {
+        let mut game = endgame_world(9, 2, 0, 0);
+        let mut t = test_piece(1, PieceType::Transport, Owner::Player, 5, 5);
+        for i in 0..6 { t.cargo.push(test_piece(10 + i, PieceType::Army, Owner::Player, 5, 5)); }
+        game.pieces.push(t);
+        game.pieces.push(test_piece(2, PieceType::Army, Owner::Comp, 8, 8));
+        assert!(game.comp_should_resign(), "1 is under 6/3");
+    }
+
+    #[test]
+    fn test_computer_resigns_only_once() {
+        let mut game = endgame_world(9, 2, 9, 2);
+        game.comp_resigned = true;
+        assert!(!game.comp_should_resign());
+        let (path, _) = save_to_json(&game, "resigned.sav");
+        assert!(Game::load_game(path.to_str().unwrap()).unwrap().comp_resigned, "remembered in saves");
+        let _ = std::fs::remove_file(path);
+    }
 }

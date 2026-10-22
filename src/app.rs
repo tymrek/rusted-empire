@@ -173,14 +173,30 @@ fn start_session(opts: Options) -> io::Result<Option<(Game, i32)>> {
         }
     }
 
-    let difficulty: u32 = if preloaded_game.is_none() {
-        match prompt_number("Welcome to rs empire (Rust Port of VMS-empire)", "Enter difficulty level (1 - 100): ")? {
-            Some(s) => s.trim().parse().unwrap_or(50).clamp(1, 100),
-            None => return Ok(None),
-        }
-    } else {
-        50
-    };
+    // A new world is made first: how many difficulty levels there are depends on its
+    // continents, as in the original.
+    let mut new_game = None;
+    if preloaded_game.is_none() {
+        let mut g = match opts.seed {
+            Some(seed) => Game::with_seed(60, 100, 0, seed),
+            None => Game::new(60, 100, 0),
+        };
+        g.torus = opts.torus;
+        let levels = g.generate_world();
+        let question = format!("Choose a difficulty level where 0 is easy and {} is hard: ", levels - 1);
+        let mut title = String::from("Welcome to rs empire (Rust Port of VMS-empire)");
+        let level = loop {
+            match prompt_number(&title, &question)? {
+                Some(s) => match s.trim().parse::<usize>() {
+                    Ok(n) if n < levels => break n,
+                    _ => title = format!("Please enter an integer in the range 0..{}.", levels - 1),
+                },
+                None => return Ok(None),
+            }
+        };
+        g.choose_start(level);
+        new_game = Some(g);
+    }
 
     let autosave_interval: i32 = match prompt_number("Autosave Configuration", "Enter autosave interval in turns (0 = Disabled): ")? {
         Some(s) => s.trim().parse().unwrap_or(0),
@@ -193,13 +209,7 @@ fn start_session(opts: Options) -> io::Result<Option<(Game, i32)>> {
         loaded_game.log(String::from("Game loaded from command line."));
         loaded_game
     } else {
-        let mut g = match opts.seed {
-            Some(seed) => Game::with_seed(60, 100, difficulty, seed),
-            None => Game::new(60, 100, difficulty),
-        };
-        g.torus = opts.torus;
-        g.setup_initial_states();
-
+        let mut g = new_game.expect("a new game was made above");
         let starting_player_cities: Vec<usize> = g.cities.iter().enumerate()
             .filter(|(_, ct)| ct.owner == Owner::Player)
             .map(|(i, _)| i)
@@ -717,6 +727,12 @@ fn edit_mode_step(game: &mut Game) -> io::Result<bool> {
 }
 
 const ACTION_PROMPT: &str = "[N]ext, [A]utomove, [M]anual, [S]ave, [L]oad, [Q]uit: ";
+/// The prompt once the computer has resigned: its map can be viewed.
+const ACTION_PROMPT_RESIGNED: &str = "[N]ext, [A]utomove, [M]anual, [V]iew enemy map, [S]ave, [L]oad, [Q]uit: ";
+
+fn action_prompt(game: &Game) -> &'static str {
+    if game.comp_resigned { ACTION_PROMPT_RESIGNED } else { ACTION_PROMPT }
+}
 
 /// What the main loop should do after a step that may end the program or the iteration.
 enum Flow {
@@ -834,7 +850,7 @@ fn auto_step(game: &mut Game) -> io::Result<Flow> {
 
         if player_moves_left == 0 {
             game.process_turn();
-            disp::refresh_display_with_input(game, ACTION_PROMPT);
+            disp::refresh_display_with_input(game, action_prompt(game));
             std::thread::sleep(Duration::from_millis(150));
         }
 
@@ -1242,7 +1258,7 @@ fn manual_move(game: &mut Game, piece_idx: usize, mut was_auto: bool, observer_m
 /// Handles one key or mouse event while no unit needs orders (the "[N]ext, [A]utomove..." prompt).
 /// Returns `Ok(true)` if the player quit the program.
 fn idle_input(game: &mut Game, observer_mode: &mut bool) -> io::Result<bool> {
-    disp::refresh_display_with_input(game, ACTION_PROMPT);
+    disp::refresh_display_with_input(game, action_prompt(game));
 
     if event::poll(Duration::from_millis(100)).unwrap_or(false) {
         let ev = event::read().unwrap();
@@ -1313,6 +1329,14 @@ fn idle_input(game: &mut Game, observer_mode: &mut bool) -> io::Result<bool> {
                             Err(e) => game.log(format!("SAVE FAILED: could not write empire.sav: {}", e)),
                         }
                     }
+                    'v' if game.comp_resigned => {
+                        game.show_comp_view = !game.show_comp_view;
+                        game.log(String::from(if game.show_comp_view {
+                            "Showing what the enemy has learned. [V] again for your own map."
+                        } else {
+                            "Back to your own map."
+                        }));
+                    }
                     'l' => {
                         match Game::load_game("empire.sav") {
                             Ok(loaded_game) => {
@@ -1337,7 +1361,7 @@ fn idle_input(game: &mut Game, observer_mode: &mut bool) -> io::Result<bool> {
 fn play(mut game: Game, autosave_interval: i32) -> io::Result<()> {
     let mut last_autosaved_turn = 0;
     let mut observer_mode = false;
-    disp::refresh_display_with_input(&game, ACTION_PROMPT);
+    disp::refresh_display_with_input(&game, action_prompt(&game));
 
     loop {
         autosave_if_due(&mut game, autosave_interval, &mut last_autosaved_turn);
@@ -1350,6 +1374,34 @@ fn play(mut game: Game, autosave_interval: i32) -> io::Result<()> {
                     return Ok(());
                 }
             }
+        }
+
+        if game.comp_should_resign() && !observer_mode {
+            disp::refresh_display_with_input(&game, "The computer acknowledges defeat. Do you wish to smash the rest of the enemy? [Y/N]: ");
+            let fight_on = loop {
+                if let Ok(Event::Key(k)) = event::read() {
+                    if let KeyCode::Char(c) = k.code {
+                        match c.to_ascii_lowercase() {
+                            'y' => break true,
+                            'n' => break false,
+                            _ => {}
+                        }
+                    }
+                }
+            };
+            if !fight_on {
+                game.log(String::from(">>> VICTORY! The computer acknowledges defeat. <<<"));
+                disp::refresh_display_with_input(&game, " GAME OVER! Press any key to exit... ");
+                loop {
+                    if let Ok(Event::Key(_)) = event::read() {
+                        return Ok(());
+                    }
+                }
+            }
+            game.comp_resigned = true;
+            game.log(String::from("The enemy inadvertently revealed its code used for receiving battle information."));
+            game.log(String::from("You can display what they've learned with the [V]iew command."));
+            continue;
         }
 
         if let Some(c_idx) = game.pending_cities.pop() {

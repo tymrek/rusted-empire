@@ -67,6 +67,14 @@ fn fresh_rng() -> StdRng {
 /// migration step to `Game::migrate`. Saves from before versioning count as version 0.
 pub const SAVE_VERSION: u32 = 3;
 
+/// A continent a side may start on (the original's `cont_t`): its value and its cities
+/// (indices into `Game::cities`).
+#[derive(Clone, Debug)]
+pub struct StartContinent {
+    pub value: i64,
+    pub cities: Vec<usize>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Game {
     /// Save-file format version (see `SAVE_VERSION`).
@@ -95,6 +103,14 @@ pub struct Game {
     /// `--headless` playtest rig. Not saved.
     #[serde(skip)]
     pub fighter_stats: [FighterStats; 2],
+    /// The computer has acknowledged defeat and the player chose to fight on (the
+    /// original's `resigned`). Its map can then be examined (`show_comp_view`).
+    #[serde(default)]
+    pub comp_resigned: bool,
+    /// Show the computer's view of the world instead of the player's (only offered once
+    /// the computer has resigned).
+    #[serde(skip)]
+    pub show_comp_view: bool,
     /// Debug observer mode (`~`): the player sees everything, live.
     #[serde(skip)]
     pub omniscient: bool,
@@ -149,6 +165,8 @@ impl Game {
             player_map,
             player_view,
             omniscient: false,
+            comp_resigned: false,
+            show_comp_view: false,
             fighter_stats: [FighterStats::default(); 2],
             comp_new_cities: Vec::new(),
             cities: Vec::new(),
@@ -562,136 +580,155 @@ impl Game {
         placed
     }
 
+    /// Generates the world and picks both starting cities at difficulty level
+    /// `self.difficulty` (limited to the levels this world offers). The interactive game
+    /// asks for the level in between instead (`generate_world`, then `choose_start`).
     pub fn setup_initial_states(&mut self) {
-        let mut best_score = -1;
-        let mut best_map = Vec::new();
-        let mut best_cities = Vec::new();
-        let mut best_continents = Vec::new();
+        let levels = self.generate_world();
+        let level = (self.difficulty as usize).min(levels - 1);
+        self.choose_start(level);
+    }
 
-        // Build 10 candidate worlds and evaluate them to find the best topology
-        for _ in 0..10 {
+    /// Makes the land and sea and places the cities, as the original's `init_game`:
+    /// cities are placed again (and, should that keep failing, the map remade) until at
+    /// least one continent is fit to start on (see `start_continents`). Returns the
+    /// number of difficulty levels this world offers (`0` easiest to `levels - 1`).
+    pub fn generate_world(&mut self) -> usize {
+        let mut attempts = 0;
+        loop {
+            if attempts % 20 == 0 {
+                self.generate_map();
+            }
+            attempts += 1;
             self.cities.clear();
-            self.generate_map();
-
-            let mut land_tiles = Vec::new();
-
-            for r in 1..self.rows - 1 {
-                for c in 1..self.cols - 1 {
-                    if self.map[r][c] == Terrain::Land {
-                        land_tiles.push(Loc { r, c });
-                    }
-                }
-            }
-
-            if land_tiles.is_empty() {
-                self.map[self.rows / 2][self.cols / 2] = Terrain::Land;
-                land_tiles.push(Loc { r: self.rows / 2, c: self.cols / 2 });
-            }
-
+            let land_tiles: Vec<Loc> = (1..self.rows - 1)
+                .flat_map(|r| (1..self.cols - 1).map(move |c| Loc { r, c }))
+                .filter(|&l| self.map[l.r][l.c] == Terrain::Land)
+                .collect();
             let target_cities = (self.rows * self.cols) / 85;
-            let chosen_city_locs = self.place_cities(&land_tiles, target_cities);
-
-            for loc in chosen_city_locs {
+            for loc in self.place_cities(&land_tiles, target_cities) {
                 self.cities.push(City {
                     loc, owner: Owner::Neutral, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
                 });
             }
+            let n = self.start_continents().len();
+            if n > 0 {
+                return n * n;
+            }
+            if attempts >= 200 && self.cities.len() >= 2 {
+                return 1; // a world too small for the rules: see `start_pairs`
+            }
+        }
+    }
 
-            let mut visited_land = vec![vec![false; self.cols]; self.rows];
-            let mut continents: Vec<Vec<usize>> = Vec::new();
-
-            for (_c_idx, city) in self.cities.iter().enumerate() {
-                if visited_land[city.loc.r][city.loc.c] { continue; }
-                
-                let mut continent_cities = Vec::new();
-                let mut queue = std::collections::VecDeque::new();
-                
-                queue.push_back(city.loc);
-                visited_land[city.loc.r][city.loc.c] = true;
-
-                while let Some(loc) = queue.pop_front() {
-                    if let Some(idx) = self.cities.iter().position(|c| c.loc == loc) {
-                        if !continent_cities.contains(&idx) { continent_cities.push(idx); }
+    /// The continents a side may start on, as the original's `find_cont`: up to the first
+    /// ten (scanning the map row by row) that have at least two cities, one of them on the
+    /// shore. Each gets a value: cities beyond the first two count most (a shore city
+    /// 3, an inland city 2, times 1000), then land area.
+    pub fn start_continents(&self) -> Vec<StartContinent> {
+        const MAX_CONT: usize = 10;
+        let on_board = |l: Loc| l.r >= 1 && l.c >= 1 && l.r + 1 < self.rows && l.c + 1 < self.cols;
+        let mut marked = vec![vec![false; self.cols]; self.rows];
+        let mut found = Vec::new();
+        for r in 0..self.rows {
+            for c in 0..self.cols {
+                if found.len() >= MAX_CONT {
+                    return found;
+                }
+                let start = Loc { r, c };
+                if !on_board(start) || marked[r][c] || !self.is_land(start) {
+                    continue;
+                }
+                // mark_cont: count the land, cities and shore cities of this continent
+                let (mut nland, mut cities, mut nshore) = (0i64, Vec::new(), 0i64);
+                let mut stack = vec![start];
+                marked[r][c] = true;
+                while let Some(l) = stack.pop() {
+                    nland += 1;
+                    if let Some(ci) = self.cities.iter().position(|ct| ct.loc == l) {
+                        cities.push(ci);
+                        if self.neighbors(l).any(|n| on_board(n) && !self.is_land(n)) {
+                            nshore += 1;
+                        }
                     }
-
-                    for n in self.neighbors(loc) {
-                        if !visited_land[n.r][n.c] && self.is_land(n) {
-                            visited_land[n.r][n.c] = true;
-                            queue.push_back(n);
+                    for n in self.neighbors(l) {
+                        if on_board(n) && !marked[n.r][n.c] && self.is_land(n) {
+                            marked[n.r][n.c] = true;
+                            stack.push(n);
                         }
                     }
                 }
-                if !continent_cities.is_empty() { continents.push(continent_cities); }
-            }
-
-            continents.sort_by(|a, b| b.len().cmp(&a.len()));
-            let valid_continents: Vec<Vec<usize>> = continents.iter().cloned().filter(|cities| cities.len() >= 2).collect();
-
-            // Fitness score: prioritize maps with a large 2nd and 3rd continent to guarantee good starts for both sides
-            let score = if valid_continents.len() >= 2 {
-                let c1 = valid_continents[0].len() as i32;
-                let c2 = valid_continents[1].len() as i32;
-                let c3 = if valid_continents.len() > 2 { valid_continents[2].len() as i32 } else { 0 };
-                (c2 * 10) + (c3 * 5) + c1
-            } else {
-                -1
-            };
-
-            if score > best_score || best_map.is_empty() {
-                best_score = score;
-                best_map = self.map.clone();
-                best_cities = self.cities.clone();
-                best_continents = valid_continents;
+                let ncity = cities.len() as i64;
+                if nshore < 1 || ncity < 2 {
+                    continue;
+                }
+                // The first two cities, one of them a shore city, don't count.
+                let mut value = if ncity == nshore {
+                    (nshore - 2) * 3
+                } else {
+                    (nshore - 1) * 3 + (ncity - nshore - 1) * 2
+                };
+                value = value * 1000 + nland;
+                found.push(StartContinent { value, cities });
             }
         }
+        found
+    }
 
-        // Apply the best map candidate found
-        self.map = best_map;
-        self.cities = best_cities;
-        let mut valid_continents = best_continents;
-
-        if valid_continents.is_empty() {
-            valid_continents.push((0..self.cities.len()).collect());
-        }
-
-        // Perfect 1 to 100 Linear Scale
-        let diff_ratio = (self.difficulty.clamp(1, 100) - 1) as f32 / 99.0;
-        
-        let p_cont_idx = (diff_ratio * (valid_continents.len() - 1) as f32).round() as usize;
-        let p_continent = &valid_continents[p_cont_idx];
-
-        let p_cap_idx = *p_continent.iter()
-            .find(|&&idx| self.is_coastal(self.cities[idx].loc))
-            .unwrap_or(&p_continent[0]);
-            
-        self.cities[p_cap_idx].owner = Owner::Player;
-
-        let mut c_cont_idx = ((1.0 - diff_ratio) * (valid_continents.len() - 1) as f32).round() as usize;
-        
-        // Force the competitors apart if they roll the exact same continent at difficulty 50
-        if c_cont_idx == p_cont_idx && valid_continents.len() > 1 {
-            if diff_ratio < 0.5 {
-                c_cont_idx = (c_cont_idx + 1).min(valid_continents.len() - 1);
-            } else {
-                c_cont_idx = c_cont_idx.saturating_sub(1);
-            }
-        }
-        
-        let c_continent = &valid_continents[c_cont_idx];
-        let c_cap_idx = c_continent[self.rng.gen_range(0..c_continent.len())];
-        self.cities[c_cap_idx].owner = Owner::Comp;
-
-        let player_capitals: Vec<Loc> = self.cities.iter()
-            .filter(|c| c.owner == Owner::Player)
-            .map(|c| c.loc)
+    /// Every (player continent, computer continent) pair, easiest for the player first:
+    /// ranked by how much better the player's continent is than the computer's (the
+    /// original's `make_pair`). Both sides may get the same continent. The position in
+    /// this list is the difficulty level.
+    pub fn start_pairs(&self) -> Vec<(usize, usize)> {
+        let conts = self.start_continents();
+        let n = conts.len();
+        let mut pairs: Vec<(i64, usize, usize)> = (0..n)
+            .flat_map(|i| (0..n).map(move |j| (i, j)))
+            .map(|(i, j)| (conts[i].value - conts[j].value, i, j))
             .collect();
+        pairs.sort_by(|a, b| b.0.cmp(&a.0)); // stable: ties keep their order
+        pairs.into_iter().map(|(_, i, j)| (i, j)).collect()
+    }
 
-        for loc in player_capitals {
-            self.reveal_vision(loc, 6);
-        }
+    /// Gives each side its first city for difficulty `level` (`0` is easiest), as the
+    /// original's `select_cities`: a random city on each side's continent, never the same
+    /// one. The player's city gets a first look around; the computer starts building
+    /// armies.
+    pub fn choose_start(&mut self, level: usize) {
+        let conts = self.start_continents();
+        let (user_cities, comp_cities) = if conts.is_empty() {
+            // A world too small for the rules: any two cities will do.
+            let all: Vec<usize> = (0..self.cities.len()).collect();
+            (all.clone(), all)
+        } else {
+            let pairs = self.start_pairs();
+            let (u, c) = pairs[level.min(pairs.len() - 1)];
+            (conts[u].cities.clone(), conts[c].cities.clone())
+        };
+        let comp_city = comp_cities[self.rng.gen_range(0..comp_cities.len())];
+        let user_city = if user_cities.iter().any(|&c| c != comp_city) {
+            loop {
+                let pick = user_cities[self.rng.gen_range(0..user_cities.len())];
+                if pick != comp_city {
+                    break pick;
+                }
+            }
+        } else {
+            // only reachable on a degenerate world with a single eligible city
+            (0..self.cities.len()).find(|&c| c != comp_city).unwrap_or(comp_city)
+        };
+        self.difficulty = level as u32;
+        self.cities[comp_city].owner = Owner::Comp;
+        self.cities[comp_city].prod = PieceType::Army;
+        self.cities[comp_city].work = 0;
+        self.cities[user_city].owner = Owner::Player;
+        self.cities[user_city].work = 0;
+        let loc = self.cities[user_city].loc;
+        self.reveal_vision(loc, 6);
 
-        self.log(format!("Classic VMS-Empire map generated. Difficulty set to {}.", self.difficulty));
+        self.log(format!("Classic VMS-Empire map generated. Difficulty level {}.", level));
         self.log(format!("Game initialized. {} cities scattered across the world.", self.cities.len()));
+        self.log(format!("Your city is at ({},{}).", loc.r, loc.c));
     }
 
     /// An army's assault on a neutral or enemy city, as in the original game's `attack_city`.
@@ -2264,6 +2301,27 @@ impl Game {
         
         self.pieces[piece_idx].activity = UnitActivity::Dest(closest_loc);
         self.pieces[piece_idx].moves_left = 0;
+    }
+
+    /// True when the computer should acknowledge defeat, as in the original's
+    /// `check_endgame`: it has fewer than a third as many cities as the player and fewer
+    /// than a third as many armies (counting with whole-number division, as the
+    /// original does). Asked once: after the computer has resigned, never again.
+    pub fn comp_should_resign(&self) -> bool {
+        if self.comp_resigned {
+            return false;
+        }
+        let count_cities = |o: Owner| self.cities.iter().filter(|c| c.owner == o).count();
+        let count_armies = |o: Owner| {
+            fn armies(pieces: &[Piece], o: Owner) -> usize {
+                pieces.iter()
+                    .map(|p| (p.owner == o && p.hits > 0 && p.ptype == PieceType::Army) as usize + armies(&p.cargo, o))
+                    .sum()
+            }
+            armies(&self.pieces, o)
+        };
+        count_cities(Owner::Comp) < count_cities(Owner::Player) / 3
+            && count_armies(Owner::Comp) < count_armies(Owner::Player) / 3
     }
 
     pub fn check_game_over(&self) -> Option<String> {
