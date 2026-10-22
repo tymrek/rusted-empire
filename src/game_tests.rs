@@ -2481,4 +2481,21 @@ mod tests {
         };
         assert_eq!(play(), play());
     }
+
+    #[test]
+    fn test_fighter_statistics_are_counted() {
+        let mut game = Game::with_seed(10, 10, 50, 1);
+        game.cities.push(city(Loc { r: 5, c: 6 }, Owner::Comp));
+        let mut f = test_piece(1, PieceType::Fighter, Owner::Comp, 5, 5);
+        f.fuel = 2;
+        game.pieces.push(f);
+        game.attempt_move(0, Loc { r: 5, c: 6 }); // lands with 1 to spare
+        let mut f = test_piece(2, PieceType::Fighter, Owner::Comp, 2, 2);
+        f.fuel = 1;
+        game.pieces.push(f);
+        game.attempt_move(1, Loc { r: 2, c: 3 }); // out of fuel
+        let st = game.fighter_stats[1];
+        assert_eq!((st.landings, st.low_fuel_landings, st.out_of_fuel), (1, 1, 1));
+        assert_eq!(game.fighter_stats[0], Default::default());
+    }
 }

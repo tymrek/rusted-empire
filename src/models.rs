@@ -231,3 +231,34 @@ pub struct City {
     #[serde(default)]
     pub seen_owner: Option<Owner>,
 }
+
+/// What happened to one side's fighters during a game, for the `--headless` playtest rig.
+/// Not saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FighterStats {
+    pub built: u32,
+    /// Landings in a city or on a carrier (each refuels the fighter).
+    pub landings: u32,
+    /// Landings with 2 or less fuel to spare: near misses.
+    pub low_fuel_landings: u32,
+    /// Ran out of fuel and crashed.
+    pub out_of_fuel: u32,
+    /// Lost in combat, attacking or defending.
+    pub shot_down: u32,
+    /// Flew into a neutral or enemy city and was shot down.
+    pub lost_over_city: u32,
+    /// Went down aboard a carrier that was sunk.
+    pub lost_with_carrier: u32,
+}
+
+impl std::ops::AddAssign for FighterStats {
+    fn add_assign(&mut self, o: Self) {
+        self.built += o.built;
+        self.landings += o.landings;
+        self.low_fuel_landings += o.low_fuel_landings;
+        self.out_of_fuel += o.out_of_fuel;
+        self.shot_down += o.shot_down;
+        self.lost_over_city += o.lost_over_city;
+        self.lost_with_carrier += o.lost_with_carrier;
+    }
+}

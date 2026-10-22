@@ -91,6 +91,10 @@ pub struct Game {
     /// choose.
     #[serde(default)]
     pub comp_new_cities: Vec<usize>,
+    /// Fighter statistics for the player (index 0) and the computer (index 1), for the
+    /// `--headless` playtest rig. Not saved.
+    #[serde(skip)]
+    pub fighter_stats: [FighterStats; 2],
     /// Debug observer mode (`~`): the player sees everything, live.
     #[serde(skip)]
     pub omniscient: bool,
@@ -145,6 +149,7 @@ impl Game {
             player_map,
             player_view,
             omniscient: false,
+            fighter_stats: [FighterStats::default(); 2],
             comp_new_cities: Vec::new(),
             cities: Vec::new(),
             pieces: Vec::new(),
@@ -894,6 +899,9 @@ impl Game {
         // asks "That's never worked before, sir" first; the UI does the same).
         if self.is_fatal_city_entry(ptype, unit_owner, target_loc) {
             self.pieces[piece_idx].hits = 0;
+            if ptype == PieceType::Fighter {
+                self.fighter_stats_mut(unit_owner).lost_over_city += 1;
+            }
             let msg = if !is_player {
                 String::new()
             } else if ptype == PieceType::Fighter {
@@ -952,6 +960,8 @@ impl Game {
             boarded_piece.loc = target_loc;
             boarded_piece.moves_left = 0;
             if ptype == PieceType::Fighter {
+                let fuel_left = boarded_piece.fuel - 1;
+                self.note_landing(unit_owner, fuel_left);
                 boarded_piece.fuel = FIGHTER_FUEL;
             }
             self.pieces[carrier_idx].cargo.push(boarded_piece);
@@ -998,6 +1008,19 @@ impl Game {
             }
 
             let attacked_player = self.pieces[e_idx].owner == Owner::Player;
+
+            // Fighter statistics: fighters lost in the fight, or aboard a sunk carrier.
+            for (who, other_dead) in [(piece_idx, self.pieces[piece_idx].hits <= 0), (e_idx, self.pieces[e_idx].hits <= 0)] {
+                if !other_dead {
+                    continue;
+                }
+                let owner = self.pieces[who].owner;
+                if self.pieces[who].ptype == PieceType::Fighter {
+                    self.fighter_stats_mut(owner).shot_down += 1;
+                }
+                let aboard = self.pieces[who].cargo.iter().filter(|c| c.ptype == PieceType::Fighter).count() as u32;
+                self.fighter_stats_mut(owner).lost_with_carrier += aboard;
+            }
 
             if self.pieces[piece_idx].hits <= 0 {
                 if self.pieces[e_idx].owner == Owner::Player { self.player_score += ptype.build_cost() as u32; }
@@ -1060,10 +1083,13 @@ impl Game {
 
                     if at_base || at_carrier {
                         // Landing refuels the fighter and ends its turn, as in the original.
+                        let fuel_left = self.pieces[piece_idx].fuel;
+                        self.note_landing(unit_owner, fuel_left);
                         self.pieces[piece_idx].fuel = FIGHTER_FUEL;
                         self.pieces[piece_idx].moves_left = 0;
                     } else if self.pieces[piece_idx].fuel <= 0 {
                         self.pieces[piece_idx].hits = 0;
+                        self.fighter_stats_mut(unit_owner).out_of_fuel += 1;
                         if is_player {
                             win_msg = format!("{} \n>>> MAYDAY! Your Fighter then ran out of fuel and crashed! <<<", win_msg);
                         }
@@ -1104,10 +1130,13 @@ impl Game {
             if at_base || at_carrier {
                 // Landing refuels the fighter and ends its turn, as in the original: no
                 // touch-and-go through a city to stretch its range.
+                let fuel_left = self.pieces[piece_idx].fuel;
+                self.note_landing(unit_owner, fuel_left);
                 self.pieces[piece_idx].fuel = FIGHTER_FUEL;
                 self.pieces[piece_idx].moves_left = 0;
             } else if self.pieces[piece_idx].fuel <= 0 {
                 self.pieces[piece_idx].hits = 0;
+                self.fighter_stats_mut(unit_owner).out_of_fuel += 1;
                 let msg = if is_player {
                     format!(">>> MAYDAY! Your Fighter at ({},{}) ran out of fuel and crashed! <<<", target_loc.r, target_loc.c)
                 } else {
@@ -1265,6 +1294,21 @@ impl Game {
         }
     }
 
+    /// The fighter statistics for `owner` (the neutral side has no fighters; it shares
+    /// the player's slot harmlessly).
+    pub(crate) fn fighter_stats_mut(&mut self, owner: Owner) -> &mut FighterStats {
+        &mut self.fighter_stats[if owner == Owner::Comp { 1 } else { 0 }]
+    }
+
+    /// Records a fighter landing with `fuel_left` to spare.
+    fn note_landing(&mut self, owner: Owner, fuel_left: i32) {
+        let st = self.fighter_stats_mut(owner);
+        st.landings += 1;
+        if fuel_left <= 2 {
+            st.low_fuel_landings += 1;
+        }
+    }
+
     /// One turn of work on city `c_idx`'s production. True if a unit is ready, as in the
     /// original's `work++ >= build_time`: the check uses the work done before this turn's
     /// increment, and any surplus carries over to the next unit.
@@ -1296,6 +1340,11 @@ impl Game {
             // A new satellite heads off on a random diagonal (the original's sat_dir).
             activity = SAT_DIRS[self.rng.gen_range(0..SAT_DIRS.len())];
         }
+        if ptype == PieceType::Fighter {
+            let owner = city.owner;
+            self.fighter_stats_mut(owner).built += 1;
+        }
+        let city = &self.cities[c_idx];
         self.pieces.push(Piece {
             id,
             ptype,
@@ -1474,13 +1523,18 @@ impl Game {
         if self.pieces[piece_idx].owner != Owner::Player || self.pieces[piece_idx].hits <= 0 { return; }
 
         let mut attack_logs = Vec::new();
+        // What the player can see, worked out once for this unit's whole move (checking each
+        // enemy against every player unit made attack orders crawl in big games). Anything
+        // newly spotted on the way is still found through the remembered view below, which
+        // every step updates.
+        let sight = self.player_sight();
 
         while self.pieces[piece_idx].moves_left > 0 && self.pieces[piece_idx].hits > 0 {
             // Targets are enemy units in sight now, plus where the player last saw others
             // (the remembered view), as the original's attack orders work from the user's map.
             let mut enemy_locs: Vec<Loc> = self.pieces.iter().enumerate()
                 .filter(|(i, p)| p.owner != Owner::Player && p.hits > 0 && p.ptype != PieceType::Satellite
-                    && self.is_visible_to(*i, Owner::Player))
+                    && self.is_visible_with(*i, Owner::Player, Some(&sight)))
                 .map(|(_, p)| p.loc)
                 .collect();
             for (r, row) in self.player_view.iter().enumerate() {
@@ -1500,7 +1554,7 @@ impl Game {
             // are not targets; otherwise they would hover beside the city until out of fuel.
             let target_city_locs: Vec<Loc> = if ptype == PieceType::Army {
                 self.cities.iter()
-                    .filter(|c| matches!(self.known_city_owner(c, None), Some(o) if o != Owner::Player))
+                    .filter(|c| matches!(self.known_city_owner(c, Some(&sight)), Some(o) if o != Owner::Player))
                     .map(|c| c.loc)
                     .collect()
             } else {

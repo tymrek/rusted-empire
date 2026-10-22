@@ -20,10 +20,12 @@ pub fn run() {
 
     let file = std::fs::File::create("playtest_metrics.csv").expect("Failed to create metrics file");
     let file_mutex = Arc::new(Mutex::new(file));
+    // Fighter statistics summed over all games: [player, computer].
+    let fighter_totals = Arc::new(Mutex::new([FighterStats::default(); 2]));
     
     {
         let mut f = file_mutex.lock().unwrap();
-        let _ = writeln!(f, "Game,Winner,Turns,ElapsedSec");
+        let _ = writeln!(f, "Game,Winner,Turns,ElapsedSec,{},{}", stats_csv_header("P"), stats_csv_header("C"));
     }
 
     let num_threads = std::thread::available_parallelism().map(|n| (n.get() / 2).clamp(1, 4)).unwrap_or(4);
@@ -38,6 +40,7 @@ pub fn run() {
         let completed_games = Arc::clone(&completed_games);
         let file_mutex = Arc::clone(&file_mutex);
         let thread_starts = Arc::clone(&thread_starts);
+        let fighter_totals = Arc::clone(&fighter_totals);
 
         handles.push(thread::spawn(move || {
             loop {
@@ -107,7 +110,13 @@ pub fn run() {
 
                 {
                     let mut f = file_mutex.lock().unwrap();
-                    let _ = writeln!(f, "{},{},{},{:.2}", i, winner, game.turn, elapsed_sec);
+                    let _ = writeln!(f, "{},{},{},{:.2},{},{}", i, winner, game.turn, elapsed_sec,
+                        stats_csv(&game.fighter_stats[0]), stats_csv(&game.fighter_stats[1]));
+                }
+                {
+                    let mut t = fighter_totals.lock().unwrap();
+                    t[0] += game.fighter_stats[0];
+                    t[1] += game.fighter_stats[1];
                 }
 
                 let mut stdout = io::stdout();
@@ -117,6 +126,7 @@ pub fn run() {
                 } else {
                     let _ = writeln!(stdout, "Game {}/{} finished in {} turns. Winner: {} [{:.2}s]", i, PLAYTEST_GAMES, game.turn, winner, elapsed_sec);
                 }
+                let _ = writeln!(stdout, "    computer fighters: {}", stats_line(&game.fighter_stats[1]));
                 
                 completed_games.fetch_add(1, Ordering::Relaxed);
             }
@@ -158,4 +168,28 @@ pub fn run() {
         c_wins.load(Ordering::Relaxed), 
         draws.load(Ordering::Relaxed)
     );
+    let totals = fighter_totals.lock().unwrap();
+    println!("Fighters, all games (details per game in playtest_metrics.csv):");
+    println!("  Computer: {}", stats_line(&totals[1]));
+    println!("  Player:   {}", stats_line(&totals[0]));
+}
+
+/// One line summing up a side's fighters.
+fn stats_line(s: &FighterStats) -> String {
+    format!(
+        "built {} | landed {} ({} with <=2 fuel) | ran out of fuel {} | shot down {} | lost over enemy cities {} | lost with carriers {}",
+        s.built, s.landings, s.low_fuel_landings, s.out_of_fuel, s.shot_down, s.lost_over_city, s.lost_with_carrier
+    )
+}
+
+fn stats_csv_header(side: &str) -> String {
+    ["FBuilt", "FLanded", "FLowFuelLandings", "FOutOfFuel", "FShotDown", "FLostOverCity", "FLostWithCarrier"]
+        .iter()
+        .map(|h| format!("{}{}", side, h))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn stats_csv(s: &FighterStats) -> String {
+    format!("{},{},{},{},{},{},{}", s.built, s.landings, s.low_fuel_landings, s.out_of_fuel, s.shot_down, s.lost_over_city, s.lost_with_carrier)
 }

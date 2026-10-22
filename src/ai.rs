@@ -541,6 +541,7 @@ impl Game {
                     self.pieces[i].moves_left = 0; // landed
                 } else if self.pieces[i].fuel <= 0 {
                     self.pieces[i].hits = 0; // crash & burn
+                    self.fighter_stats_mut(Owner::Comp).out_of_fuel += 1;
                 }
             }
             guard += 1;
