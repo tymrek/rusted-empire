@@ -81,6 +81,11 @@ pub fn run() {
 
                     game.process_turn();
 
+                    if game.comp_should_resign() {
+                        p_wins.fetch_add(1, Ordering::Relaxed);
+                        break "Player (Comp resigned)";
+                    }
+
                     if let Some(msg) = game.check_game_over() {
                         break if msg.contains("VICTORY") || msg.contains("TOTAL DOMINATION") {
                             p_wins.fetch_add(1, Ordering::Relaxed);

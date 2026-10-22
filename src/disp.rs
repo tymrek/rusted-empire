@@ -132,6 +132,21 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
             let mut spans = Vec::new();
             for &c in &col_coords {
                 let loc = Loc { r, c };
+                if game.show_comp_view {
+                    // The computer's map, as it has seen the world (after it resigns).
+                    let ch = match game.comp_map[r][c] { 0 => b' ', ch => ch };
+                    let color = match ch {
+                        b'X' => Color::Red,
+                        b'O' => Color::Green,
+                        b'*' | b'+' => Color::Yellow,
+                        b'.' => Color::Blue,
+                        ch if ch.is_ascii_uppercase() => Color::Cyan,
+                        _ => Color::LightRed,
+                    };
+                    let shown = if ch == b'+' { '#' } else { ch as char };
+                    spans.push(Span::styled(shown.to_string(), Style::default().fg(color)));
+                    continue;
+                }
                 let is_explored = game.player_map[r][c] == 1;
 
                 if !is_explored {
@@ -196,7 +211,11 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
             lines.push(Line::from(spans));
         }
 
-        let map_title = format!(" rs Empire | Turn: {} | Mode: {:?} ", game.turn, game.mode);
+        let map_title = if game.show_comp_view {
+            format!(" rs Empire | Turn: {} | THE ENEMY'S MAP ", game.turn)
+        } else {
+            format!(" rs Empire | Turn: {} | Mode: {:?} ", game.turn, game.mode)
+        };
         let map_widget = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(map_title));
         f.render_widget(map_widget, map_area);
