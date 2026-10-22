@@ -82,6 +82,16 @@ impl PieceType {
         }
     }
 
+    /// Moves per turn for a unit with `hits` hits left, as in the original game:
+    /// speed scales with remaining health, rounded up, and a live unit always gets
+    /// at least one move. (A battleship at half health moves at half speed.)
+    pub fn moves_for_hits(&self, hits: i32) -> i32 {
+        if hits <= 0 {
+            return 0;
+        }
+        (self.max_moves() * hits + self.max_hits() - 1) / self.max_hits()
+    }
+
     pub fn max_hits(&self) -> i32 {
         match self {
             PieceType::Army => 1,

@@ -1436,4 +1436,157 @@ mod tests {
         assert_eq!(back, vec![Terrain::Land, Terrain::Sea]);
         assert!(serde_json::from_str::<Vec<Terrain>>("[7]").is_err());
     }
+
+    // ---- damaged ships: speed and repair, as in the original ----
+
+    #[test]
+    fn test_moves_for_hits_matches_original_formula() {
+        // ceil(speed * hits / max_hits), minimum 1 while alive
+        let bb = PieceType::Battleship; // speed 2, 10 hits
+        assert_eq!((bb.moves_for_hits(10), bb.moves_for_hits(6), bb.moves_for_hits(5), bb.moves_for_hits(1)), (2, 2, 1, 1));
+        let car = PieceType::Carrier; // speed 2, 8 hits
+        assert_eq!((car.moves_for_hits(8), car.moves_for_hits(5), car.moves_for_hits(4), car.moves_for_hits(1)), (2, 2, 1, 1));
+        let dd = PieceType::Destroyer; // speed 2, 3 hits
+        assert_eq!((dd.moves_for_hits(3), dd.moves_for_hits(2), dd.moves_for_hits(1)), (2, 2, 1));
+        let sub = PieceType::Submarine; // speed 2, 2 hits
+        assert_eq!((sub.moves_for_hits(2), sub.moves_for_hits(1)), (2, 1));
+        assert_eq!(PieceType::Fighter.moves_for_hits(1), 8);
+        assert_eq!(PieceType::PatrolBoat.moves_for_hits(1), 4);
+        assert_eq!(bb.moves_for_hits(0), 0);
+    }
+
+    fn port_world(ptype: PieceType, hits: i32, owner: Owner) -> Game {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.cities.push(City { loc: Loc { r: 5, c: 5 }, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
+        let mut ship = test_piece(1, ptype, owner, 5, 5);
+        ship.hits = hits;
+        ship.activity = UnitActivity::Idle;
+        game.pieces.push(ship);
+        game
+    }
+
+    #[test]
+    fn test_damaged_ship_gets_reduced_moves_each_turn() {
+        for (ptype, hits, expected) in [
+            (PieceType::Battleship, 10, 2), (PieceType::Battleship, 6, 2), (PieceType::Battleship, 5, 1),
+            (PieceType::Carrier, 5, 2), (PieceType::Carrier, 4, 1),
+            (PieceType::Destroyer, 1, 1), (PieceType::Submarine, 2, 2),
+        ] {
+            let mut game = port_world(ptype, hits, Owner::Player);
+            game.cities[0].owner = Owner::Neutral; // no repair interferes
+            game.process_turn();
+            assert_eq!(game.pieces[0].moves_left, expected, "{:?} with {} hits", ptype, hits);
+        }
+    }
+
+    #[test]
+    fn test_ship_damaged_in_combat_loses_the_rest_of_its_moves() {
+        let (mut saw_slowed, mut saw_hurt_but_fast) = (false, false);
+        for seed in 0..400 {
+            let mut game = Game::with_seed(10, 10, 50, seed);
+            game.map = vec![vec![Terrain::Sea; 10]; 10];
+            let mut bb = test_piece(1, PieceType::Battleship, Owner::Player, 5, 5);
+            bb.moves_left = 2;
+            game.pieces.push(bb);
+            game.pieces.push(test_piece(2, PieceType::Battleship, Owner::Comp, 5, 6));
+            let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+            let hits = game.pieces[0].hits;
+            if result == MoveResult::CombatWon && hits < 10 {
+                // allowance is recomputed from current hits; one move was spent attacking
+                let expected = (PieceType::Battleship.moves_for_hits(hits) - 1).max(0);
+                assert_eq!(game.pieces[0].moves_left, expected, "hits {}", hits);
+                if hits <= 5 { saw_slowed = true; assert_eq!(expected, 0); } else { saw_hurt_but_fast = true; }
+            }
+        }
+        assert!(saw_slowed, "needed a seed where the attacker won but dropped to 5 hits or fewer");
+        assert!(saw_hurt_but_fast);
+    }
+
+    #[test]
+    fn test_unhurt_attacker_keeps_its_remaining_move() {
+        let mut found = false;
+        for seed in 0..200 {
+            let mut game = Game::with_seed(10, 10, 50, seed);
+            game.map = vec![vec![Terrain::Sea; 10]; 10];
+            let mut bb = test_piece(1, PieceType::Battleship, Owner::Player, 5, 5);
+            bb.moves_left = 2;
+            game.pieces.push(bb);
+            game.pieces.push(test_piece(2, PieceType::PatrolBoat, Owner::Comp, 5, 6));
+            let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+            if result == MoveResult::CombatWon && game.pieces[0].hits == 10 {
+                found = true;
+                assert_eq!(game.pieces[0].moves_left, 1);
+            }
+        }
+        assert!(found);
+    }
+
+    #[test]
+    fn test_idle_damaged_boat_in_port_repairs_one_hit_per_turn() {
+        let mut game = port_world(PieceType::Destroyer, 1, Owner::Player);
+        game.process_turn();
+        assert_eq!(game.pieces[0].hits, 2);
+        game.process_turn();
+        assert_eq!(game.pieces[0].hits, 3);
+        game.process_turn();
+        assert_eq!(game.pieces[0].hits, 3, "never past the maximum");
+    }
+
+    #[test]
+    fn test_computer_boats_repair_in_port_too() {
+        let mut game = port_world(PieceType::Battleship, 5, Owner::Comp);
+        game.process_turn();
+        game.process_turn();
+        assert!(game.pieces.iter().find(|p| p.id == 1).map_or(false, |p| p.hits >= 6));
+    }
+
+    #[test]
+    fn test_boat_that_moved_does_not_repair_even_if_it_came_back() {
+        let mut game = port_world(PieceType::Destroyer, 1, Owner::Player);
+        game.pieces[0].moves_left = 2;
+        game.attempt_move(0, Loc { r: 5, c: 6 }); // out...
+        game.attempt_move(0, Loc { r: 5, c: 5 }); // ...and back into port
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 5 });
+        game.process_turn();
+        assert_eq!(game.pieces[0].hits, 1, "it changed location this turn, so no repair");
+        game.process_turn(); // a full turn without moving
+        assert_eq!(game.pieces[0].hits, 2);
+    }
+
+    #[test]
+    fn test_only_boats_in_their_own_port_repair() {
+        let mut game = port_world(PieceType::Destroyer, 1, Owner::Player);
+        game.cities[0].owner = Owner::Comp; // enemy port
+        game.process_turn();
+        game.process_turn();
+        assert_eq!(game.pieces[0].hits, 1);
+
+        let mut game = port_world(PieceType::Army, 1, Owner::Player);
+        game.pieces[0].hits = 1;
+        game.process_turn();
+        game.process_turn();
+        assert_eq!(game.pieces[0].hits, 1, "armies are not boats");
+    }
+
+    #[test]
+    fn test_upgrade_order_repairs_exactly_one_hit_per_turn() {
+        let mut game = port_world(PieceType::Battleship, 5, Owner::Player);
+        game.pieces[0].activity = UnitActivity::Upgrade;
+        game.process_turn();
+        assert_eq!(game.pieces[0].hits, 6, "one hit per turn, not two");
+        game.process_turn();
+        assert_eq!(game.pieces[0].hits, 7);
+        assert_eq!(game.pieces[0].activity, UnitActivity::Upgrade);
+    }
+
+    #[test]
+    fn test_moved_this_turn_survives_a_save() {
+        let mut game = port_world(PieceType::Destroyer, 1, Owner::Player);
+        game.pieces[0].moves_left = 2;
+        game.attempt_move(0, Loc { r: 5, c: 6 });
+        let json = serde_json::to_string(&game).unwrap();
+        let back: Game = serde_json::from_str(&json).unwrap();
+        assert!(back.moved_this_turn.contains(&1));
+    }
 }
