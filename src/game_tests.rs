@@ -1589,4 +1589,80 @@ mod tests {
         let back: Game = serde_json::from_str(&json).unwrap();
         assert!(back.moved_this_turn.contains(&1));
     }
+
+    // ---- one distance metric everywhere ----
+
+    #[test]
+    fn test_loc_dist_is_the_larger_axis_difference() {
+        let a = Loc { r: 2, c: 3 };
+        assert_eq!(a.dist(&Loc { r: 2, c: 3 }), 0);
+        assert_eq!(a.dist(&Loc { r: 5, c: 4 }), 3);
+        assert_eq!(a.dist(&Loc { r: 0, c: 9 }), 6);
+        assert_eq!(Loc { r: 9, c: 0 }.dist(&Loc { r: 0, c: 9 }), 9, "symmetric, diagonals cost one");
+    }
+
+    /// Two own cities where Euclidean and move-distance disagree about which is nearer:
+    /// (0,5) is 5 moves from the origin (distance^2 25); (4,4) is 4 moves (distance^2 32).
+    fn two_city_world() -> Game {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        for loc in [Loc { r: 0, c: 5 }, Loc { r: 4, c: 4 }] {
+            game.map[loc.r][loc.c] = Terrain::Land;
+            game.cities.push(City { loc, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
+        }
+        game
+    }
+
+    #[test]
+    fn test_fighter_landing_picks_the_city_nearest_in_moves() {
+        let mut game = two_city_world();
+        let mut fighter = test_piece(1, PieceType::Fighter, Owner::Player, 0, 0);
+        fighter.fuel = 20;
+        game.pieces.push(fighter);
+        game.process_land_mode(0);
+        assert_eq!(game.pieces[0].activity, UnitActivity::Dest(Loc { r: 4, c: 4 }));
+    }
+
+    #[test]
+    fn test_damaged_ship_heads_for_the_city_nearest_in_moves() {
+        let mut game = two_city_world();
+        let mut ship = test_piece(1, PieceType::Destroyer, Owner::Player, 0, 0);
+        ship.hits = 1;
+        ship.moves_left = 2;
+        game.pieces.push(ship);
+        game.process_upgrade_mode(0);
+        assert!(game.pieces[0].loc.r >= 1, "sailed toward (4,4), not along the top edge toward (0,5): {:?}", game.pieces[0].loc);
+    }
+
+    // ---- one distance metric ----
+
+    fn sentry_world(enemy_r: usize, enemy_c: usize) -> Game {
+        let mut game = Game::new(15, 15, 50);
+        game.map = vec![vec![Terrain::Land; 15]; 15];
+        let mut sentry = test_piece(1, PieceType::Army, Owner::Player, 5, 5);
+        sentry.activity = UnitActivity::Sentry;
+        game.pieces.push(sentry);
+        game.pieces.push(test_piece(2, PieceType::Army, Owner::Comp, enemy_r, enemy_c));
+        game.player_map[enemy_r][enemy_c] = 1; // the enemy is in view
+        game
+    }
+
+    #[test]
+    fn test_sentry_wakes_on_the_diagonal_at_sight_range() {
+        // Army sight is 2. A diagonal enemy two squares away is at dist() == 2
+        // (Chebyshev), even though its straight-line distance is 2.83.
+        let mut game = sentry_world(7, 7);
+        game.process_turn();
+        assert_ne!(game.pieces[0].activity, UnitActivity::Sentry);
+    }
+
+    #[test]
+    fn test_sentry_ignores_enemies_beyond_sight_range() {
+        let mut game = sentry_world(8, 5);
+        game.process_turn();
+        assert_eq!(game.pieces[0].activity, UnitActivity::Sentry);
+        let mut game = sentry_world(8, 8);
+        game.process_turn();
+        assert_eq!(game.pieces[0].activity, UnitActivity::Sentry);
+    }
 }
