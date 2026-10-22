@@ -2020,4 +2020,148 @@ mod tests {
         assert!(loaded.torus);
         let _ = std::fs::remove_file(path);
     }
+
+    fn unit(id: usize, ptype: PieceType, owner: Owner, r: usize, c: usize) -> Piece {
+        Piece {
+            id, ptype, owner, loc: Loc { r, c },
+            hits: ptype.max_hits(),
+            moves_left: ptype.max_moves(),
+            activity: UnitActivity::Idle,
+            cargo: Vec::new(),
+            fuel: match ptype { PieceType::Fighter => 32, PieceType::Satellite => 20, _ => 0 },
+        }
+    }
+
+    fn city(loc: Loc, owner: Owner) -> City {
+        City { loc, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new() }
+    }
+
+    #[test]
+    fn test_satellite_flies_over_land() {
+        let mut game = Game::with_seed(10, 10, 50, 1);
+        game.map = vec![vec![Terrain::Land; 10]; 10];
+        game.pieces.push(unit(1, PieceType::Satellite, Owner::Player, 5, 5));
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::Moved);
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 6 });
+
+        // Standing orders work over land too.
+        game.pieces[0].activity = UnitActivity::Random;
+        game.pieces[0].moves_left = 10;
+        game.random_piece(0);
+        assert_eq!(game.pieces[0].moves_left, 0, "satellite should spend all its moves over land");
+    }
+
+    #[test]
+    fn test_transport_deck_counts_toward_capacity() {
+        let mut game = Game::with_seed(10, 10, 50, 1);
+        game.map[5][4] = Terrain::Land;
+        let mut transport = unit(1, PieceType::Transport, Owner::Player, 5, 5);
+        for i in 0..6 {
+            transport.cargo.push(unit(10 + i, PieceType::Army, Owner::Player, 5, 5));
+        }
+        game.pieces.push(transport);
+        game.wake_cargo(0); // all six now stand on deck
+        assert_eq!(game.free_berths(&game.pieces[0], None), 0);
+
+        // A seventh army can't squeeze aboard: like a full hold, it goes into the sea.
+        game.pieces.push(unit(20, PieceType::Army, Owner::Player, 5, 4));
+        let seventh = game.pieces.len() - 1;
+        let (result, _) = game.attempt_move(seventh, Loc { r: 5, c: 5 });
+        assert_eq!(result, MoveResult::CombatLost);
+        game.pieces.retain(|p| p.hits > 0);
+
+        // One of the six on deck can still go below into the hold.
+        let deck_army = game.pieces.iter().position(|p| p.ptype == PieceType::Army).unwrap();
+        let (result, msg) = game.attempt_move(deck_army, Loc { r: 5, c: 5 });
+        assert_eq!(result, MoveResult::Moved, "{}", msg);
+        assert!(msg.contains("boarded"));
+        game.pieces.retain(|p| p.hits > 0);
+
+        // When the transport sails, nobody is left behind on the open sea.
+        let t = game.pieces.iter().position(|p| p.ptype == PieceType::Transport).unwrap();
+        game.attempt_move(t, Loc { r: 5, c: 6 });
+        assert!(!game.pieces.iter().any(|p| p.ptype == PieceType::Army && p.hits > 0 && p.loc == Loc { r: 5, c: 5 }));
+        let t = &game.pieces[t];
+        let on_deck = game.pieces.iter().filter(|p| p.ptype == PieceType::Army && p.hits > 0 && p.loc == t.loc).count();
+        assert_eq!(t.cargo.len() + on_deck, 6);
+    }
+
+    #[test]
+    fn test_armies_on_deck_drown_when_their_transport_sinks() {
+        let mut game = Game::with_seed(10, 10, 50, 3);
+        let mut transport = unit(1, PieceType::Transport, Owner::Player, 5, 5);
+        transport.cargo.push(unit(10, PieceType::Army, Owner::Player, 5, 5));
+        transport.cargo.push(unit(11, PieceType::Army, Owner::Player, 5, 5));
+        game.pieces.push(transport);
+        game.wake_cargo(0);
+        // A battleship keeps attacking until the one-hit transport goes down.
+        game.pieces.push(unit(2, PieceType::Battleship, Owner::Comp, 5, 6));
+        let bs = game.pieces.len() - 1;
+        while game.pieces[0].hits > 0 {
+            game.pieces[bs].hits = 10;
+            game.attempt_move(bs, Loc { r: 5, c: 5 });
+        }
+        assert!(!game.pieces.iter().any(|p| p.ptype == PieceType::Army && p.hits > 0),
+            "armies standing on a sunk transport's deck must not be left floating");
+    }
+
+    #[test]
+    fn test_fighter_on_attack_does_not_circle_an_enemy_city() {
+        let mut game = Game::with_seed(20, 20, 50, 1);
+        game.map = vec![vec![Terrain::Land; 20]; 20];
+        for row in game.player_map.iter_mut() { for v in row.iter_mut() { *v = 1; } }
+        game.cities.push(city(Loc { r: 10, c: 10 }, Owner::Comp));
+        game.cities.push(city(Loc { r: 10, c: 2 }, Owner::Player));
+        let mut fighter = unit(1, PieceType::Fighter, Owner::Player, 10, 6);
+        fighter.activity = UnitActivity::Attack;
+        game.pieces.push(fighter);
+        game.attack_piece(0);
+        // Nothing it can attack: it falls back to exploring (and, with the whole map known,
+        // wakes up) instead of flying to the city and burning fuel beside it.
+        assert_ne!(game.pieces[0].activity, UnitActivity::Attack);
+        assert!(game.pieces[0].fuel >= 31, "fuel burned: {}", game.pieces[0].fuel);
+    }
+
+    #[test]
+    fn test_fighter_on_attack_still_hunts_enemy_units() {
+        let mut game = Game::with_seed(20, 20, 50, 1);
+        game.map = vec![vec![Terrain::Land; 20]; 20];
+        for row in game.player_map.iter_mut() { for v in row.iter_mut() { *v = 1; } }
+        game.cities.push(city(Loc { r: 10, c: 10 }, Owner::Comp));
+        game.cities.push(city(Loc { r: 10, c: 2 }, Owner::Player));
+        game.pieces.push(unit(1, PieceType::Fighter, Owner::Player, 10, 6));
+        game.pieces[0].activity = UnitActivity::Attack;
+        game.pieces.push(unit(2, PieceType::Army, Owner::Comp, 4, 6));
+        game.attack_piece(0);
+        assert!(game.pieces[0].hits == 0 || game.pieces[1].hits == 0, "the fighter should have engaged the army");
+    }
+
+    #[test]
+    fn test_fighter_landing_in_city_ends_its_turn() {
+        let mut game = Game::with_seed(10, 10, 50, 1);
+        game.cities.push(city(Loc { r: 5, c: 6 }, Owner::Player));
+        let mut fighter = unit(1, PieceType::Fighter, Owner::Player, 5, 5);
+        fighter.fuel = 3;
+        game.pieces.push(fighter);
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::Moved);
+        assert_eq!(game.pieces[0].fuel, 32);
+        assert_eq!(game.pieces[0].moves_left, 0, "no touch-and-go: landing ends the turn");
+    }
+
+    #[test]
+    fn test_fighter_over_full_carrier_refuels_and_stops() {
+        let mut game = Game::with_seed(10, 10, 50, 1);
+        let mut carrier = unit(1, PieceType::Carrier, Owner::Player, 5, 6);
+        carrier.hits = 1; // badly damaged: room for one fighter
+        carrier.cargo.push(unit(10, PieceType::Fighter, Owner::Player, 5, 6));
+        game.pieces.push(carrier);
+        let mut fighter = unit(2, PieceType::Fighter, Owner::Player, 5, 5);
+        fighter.fuel = 3;
+        game.pieces.push(fighter);
+        game.attempt_move(1, Loc { r: 5, c: 6 });
+        assert_eq!(game.pieces[1].fuel, 32);
+        assert_eq!(game.pieces[1].moves_left, 0);
+    }
 }

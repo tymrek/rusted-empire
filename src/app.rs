@@ -930,35 +930,6 @@ fn manual_move(game: &mut Game, piece_idx: usize, mut was_auto: bool, observer_m
                             let is_sentry = ch == 's' || ch == 'S';
                             let is_twait = ch == 't' || ch == 'T';
                             let is_wake = ch == 'w' || ch == 'W';
-                            let mut proceed = true;
-                            let mut attack_own_city = false;
-
-                            if ptype == PieceType::Army && game.cities.iter().any(|c| c.loc == loc && c.owner == Owner::Player) {
-                                let prompt = format!("Army must move out of city! Attack own city at ({},{})? [Y/N]: ", loc.r, loc.c);
-                                disp::refresh_display_with_input(game, &prompt);
-                                loop {
-                                    if let Ok(Event::Key(k)) = event::read() {
-                                        if let KeyCode::Char(c) = k.code {
-                                            match c.to_ascii_lowercase() {
-                                                'y' => { attack_own_city = true; break; }
-                                                'n' => { proceed = false; break; }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-                                }
-                                while event::poll(Duration::from_millis(0)).unwrap_or(false) { let _ = event::read(); }
-                            }
-
-                            if !proceed {
-                                continue;
-                            }
-
-                            if attack_own_city {
-                                let (_result, msg) = game.attempt_move(piece_idx, loc);
-                                game.log(msg);
-                                break;
-                            }
 
                             if !is_wake {
                                 game.pieces[piece_idx].moves_left = 0;
@@ -966,8 +937,15 @@ fn manual_move(game: &mut Game, piece_idx: usize, mut was_auto: bool, observer_m
 
                             if is_sentry {
                                 let mut boarded = false;
-                                // If sentried while stacked on a transport, go below deck into cargo
-                                if ptype == PieceType::Army || ptype == PieceType::Fighter {
+                                // If sentried while stacked on a transport (or a fighter on a
+                                // carrier) with room, go below deck into its hold.
+                                let my_id = game.pieces[piece_idx].id;
+                                let ship_with_room = game.pieces.iter().any(|p| {
+                                    p.loc == loc && p.owner == Owner::Player
+                                        && p.ptype.cargo_type() == Some(ptype)
+                                        && game.has_room_for(p, Some(my_id))
+                                });
+                                if ship_with_room {
                                     let (res, msg) = game.attempt_move(piece_idx, loc);
                                     if res == MoveResult::Moved && msg.contains("boarded") {
                                         game.log(msg);
@@ -1175,30 +1153,6 @@ fn manual_move(game: &mut Game, piece_idx: usize, mut was_auto: bool, observer_m
 
                     if is_move {
                         if let Some(target_loc) = game.step(loc, (dr_val, dc_val)) {
-
-                            let mut proceed = true;
-                            if ptype == PieceType::Army {
-                                if game.cities.iter().any(|c| c.loc == target_loc && c.owner == Owner::Player) {
-                                    let prompt = format!("Really attack your own city at ({},{})? [Y/N]: ", target_loc.r, target_loc.c);
-                                    disp::refresh_display_with_input(game, &prompt);
-                                    loop {
-                                        if let Ok(Event::Key(k)) = event::read() {
-                                            if let KeyCode::Char(c) = k.code {
-                                                match c.to_ascii_lowercase() {
-                                                    'y' => { break; }
-                                                    'n' => { proceed = false; break; }
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if !proceed {
-                                game.log(String::from("Friendly city attack cancelled."));
-                                break;
-                            }
 
                             // As in the original game, moves that destroy the unit (a fighter
                             // or ship into an enemy city, a ship ashore, an army into the sea)

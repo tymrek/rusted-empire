@@ -256,6 +256,78 @@ impl Game {
         min_dist
     }
 
+    /// Room left aboard `carrier` (a transport or carrier) for one more piece, ignoring the
+    /// piece with id `mover` (the one asking to board, which may already be on deck).
+    ///
+    /// A carrier's load is its hold (`cargo`) plus any awake pieces of the type it carries
+    /// sharing its square at sea: those are standing on deck and sail with it. In a city
+    /// such pieces are just in the city, so they don't count.
+    pub fn free_berths(&self, carrier: &Piece, mover: Option<usize>) -> usize {
+        let Some(cargo_type) = carrier.ptype.cargo_type() else { return 0 };
+        if carrier.hits <= 0 {
+            return 0;
+        }
+        let capacity = carrier.ptype.capacity_for_hits(carrier.hits);
+        let in_city = self.cities.iter().any(|c| c.loc == carrier.loc);
+        let on_deck = if in_city {
+            0
+        } else {
+            self.pieces.iter()
+                .filter(|p| p.loc == carrier.loc && p.owner == carrier.owner && p.hits > 0
+                    && p.ptype == cargo_type && Some(p.id) != mover)
+                .count()
+        };
+        capacity.saturating_sub(carrier.cargo.len() + on_deck)
+    }
+
+    /// True if `carrier` can take the piece with id `mover` aboard.
+    pub fn has_room_for(&self, carrier: &Piece, mover: Option<usize>) -> bool {
+        self.free_berths(carrier, mover) > 0
+    }
+
+    /// Drowns armies left standing on open sea with no transport of their own under them
+    /// (their transport sank, or sailed off without them). Returns how many of the
+    /// player's armies were lost.
+    fn drown_stranded_armies(&mut self) -> usize {
+        let transport_squares: std::collections::HashSet<(Loc, Owner)> = self.pieces.iter()
+            .filter(|p| p.ptype == PieceType::Transport && p.hits > 0)
+            .map(|p| (p.loc, p.owner))
+            .collect();
+        let mut player_lost = 0;
+        for i in 0..self.pieces.len() {
+            let p = &self.pieces[i];
+            if p.ptype == PieceType::Army && p.hits > 0
+                && self.map[p.loc.r][p.loc.c] == Terrain::Sea
+                && !transport_squares.contains(&(p.loc, p.owner))
+            {
+                if p.owner == Owner::Player {
+                    player_lost += 1;
+                }
+                self.pieces[i].hits = 0;
+            }
+        }
+        player_lost
+    }
+
+    /// Moves along any awake pieces standing on the deck of the transport or carrier at
+    /// `piece_idx`, which has just sailed from `old_loc`, as far as its capacity allows.
+    fn drag_deck_cargo(&mut self, piece_idx: usize, old_loc: Loc) {
+        let ptype = self.pieces[piece_idx].ptype;
+        let Some(cargo_type) = ptype.cargo_type() else { return };
+        let owner = self.pieces[piece_idx].owner;
+        let new_loc = self.pieces[piece_idx].loc;
+        let capacity = ptype.capacity_for_hits(self.pieces[piece_idx].hits);
+        let mut deck_space = capacity.saturating_sub(self.pieces[piece_idx].cargo.len());
+        for i in 0..self.pieces.len() {
+            if deck_space == 0 { break; }
+            let p = &self.pieces[i];
+            if i != piece_idx && p.loc == old_loc && p.owner == owner && p.hits > 0 && p.ptype == cargo_type {
+                self.pieces[i].loc = new_loc;
+                deck_space -= 1;
+            }
+        }
+    }
+
     pub fn is_visible_to(&self, target_idx: usize, viewer: Owner) -> bool {
         let target = &self.pieces[target_idx];
         if target.owner == viewer { return true; }
@@ -338,14 +410,20 @@ impl Game {
         if self.cities.iter().any(|c| c.loc == loc && c.owner == owner) {
             return false;
         }
+        // Satellites orbit above everything and never share a square with anyone.
+        if moving_ptype == PieceType::Satellite {
+            return false;
+        }
         let mut can_board = false;
         let mut has_blocker = false;
         for other in &self.pieces {
             if other.loc != loc || other.owner != owner || other.hits <= 0 { continue; }
-            let is_fighter_flyover = (moving_ptype == PieceType::Fighter && other.ptype != PieceType::Fighter) || 
+            if other.ptype == PieceType::Satellite { continue; }
+            let is_fighter_flyover = (moving_ptype == PieceType::Fighter && other.ptype != PieceType::Fighter) ||
                                      (moving_ptype != PieceType::Fighter && other.ptype == PieceType::Fighter);
-            let can_board_transport = moving_ptype == PieceType::Army && other.ptype == PieceType::Transport && other.cargo.len() < 6;
-            let can_board_carrier = moving_ptype == PieceType::Fighter && other.ptype == PieceType::Carrier && other.cargo.len() < other.hits as usize;
+            let boards = other.ptype.cargo_type() == Some(moving_ptype) && self.has_room_for(other, None);
+            let can_board_transport = boards && moving_ptype == PieceType::Army;
+            let can_board_carrier = boards && moving_ptype == PieceType::Fighter;
             
             if can_board_transport || can_board_carrier {
                 can_board = true;
@@ -604,6 +682,12 @@ impl Game {
     /// - an army that walks into the sea, or onto a transport that is full, drowns.
     /// Cities are handled separately (`is_fatal_city_entry`, `assault_city`).
     pub fn is_suicidal_terrain_entry(&self, ptype: PieceType, owner: Owner, loc: Loc) -> bool {
+        self.is_suicidal_entry_for(ptype, owner, loc, None)
+    }
+
+    /// `is_suicidal_terrain_entry` for the piece with id `mover`, which is left out when
+    /// counting who is already aboard a transport (it may be standing on its deck).
+    fn is_suicidal_entry_for(&self, ptype: PieceType, owner: Owner, loc: Loc, mover: Option<usize>) -> bool {
         let is_land = self.map[loc.r][loc.c] == Terrain::Land;
         let own_piece_here = |pred: &dyn Fn(&Piece) -> bool| {
             self.pieces.iter().any(|p| p.loc == loc && p.owner == owner && p.hits > 0 && pred(p))
@@ -614,7 +698,7 @@ impl Game {
                 && !own_piece_here(&|p| p.ptype != PieceType::Satellite && p.ptype != PieceType::Fighter)
         } else if ptype == PieceType::Army {
             !is_land
-                && !own_piece_here(&|p| p.ptype == PieceType::Transport && p.cargo.len() < 6)
+                && !own_piece_here(&|p| p.ptype == PieceType::Transport && self.has_room_for(p, mover))
                 && !own_piece_here(&|p| p.ptype != PieceType::Satellite && p.ptype != PieceType::Fighter && p.ptype != PieceType::Transport)
         } else {
             false
@@ -679,6 +763,17 @@ impl Game {
     }
 
     pub fn attempt_move(&mut self, piece_idx: usize, target_loc: Loc) -> (MoveResult, String) {
+        let (result, mut msg) = self.attempt_move_inner(piece_idx, target_loc);
+        // A transport that sank, or sailed off with a full deck, leaves its armies in the sea.
+        let drowned = self.drown_stranded_armies();
+        if drowned > 0 {
+            let note = format!(">>> {} of your armies drowned when their transport was lost! <<<", drowned);
+            msg = if msg.is_empty() { note } else { format!("{} \n{}", msg, note) };
+        }
+        (result, msg)
+    }
+
+    fn attempt_move_inner(&mut self, piece_idx: usize, target_loc: Loc) -> (MoveResult, String) {
         let ptype = self.pieces[piece_idx].ptype;
         let is_land = self.map[target_loc.r][target_loc.c] == Terrain::Land;
         
@@ -688,11 +783,13 @@ impl Game {
         let is_friendly_city = self.cities.iter().any(|c| c.loc == target_loc && c.owner == unit_owner);
         let can_enter = match ptype {
             PieceType::Army => is_land || self.pieces.iter().any(|p| p.loc == target_loc && p.owner == unit_owner && p.ptype == PieceType::Transport && p.hits > 0),
+            PieceType::Fighter | PieceType::Satellite => true,
             _ => !is_land || is_friendly_city, 
         };
 
         // True when this move kills the unit whatever happens (ship ashore, army at sea).
-        let suicidal = self.is_suicidal_terrain_entry(ptype, unit_owner, target_loc);
+        let mover_id = Some(self.pieces[piece_idx].id);
+        let suicidal = self.is_suicidal_entry_for(ptype, unit_owner, target_loc, mover_id);
 
         // Fighters and ships cannot take a city: the attempt destroys them (the original game
         // asks "That's never worked before, sir" first; the UI does the same).
@@ -708,7 +805,7 @@ impl Game {
             return (MoveResult::CombatLost, msg);
         }
 
-        if !can_enter && ptype != PieceType::Fighter && !suicidal {
+        if !can_enter && !suicidal {
             return (MoveResult::InvalidMove, if is_player { String::from("Terrain impassable for this unit type.") } else { String::new() });
         }
 
@@ -730,8 +827,9 @@ impl Game {
                 if i != piece_idx && other.loc == target_loc && other.hits > 0 {
                     if other.ptype == PieceType::Satellite { continue; }
                     if other.owner == unit_owner {
-                        let can_board_transport = ptype == PieceType::Army && other.ptype == PieceType::Transport && other.cargo.len() < 6;
-                        let can_board_carrier = ptype == PieceType::Fighter && other.ptype == PieceType::Carrier && other.cargo.len() < other.hits as usize;
+                        let boards = other.ptype.cargo_type() == Some(ptype) && self.has_room_for(other, mover_id);
+                        let can_board_transport = boards && ptype == PieceType::Army;
+                        let can_board_carrier = boards && ptype == PieceType::Fighter;
                         let is_fighter_flyover = (ptype == PieceType::Fighter && other.ptype != PieceType::Fighter) || 
                                                  (ptype != PieceType::Fighter && other.ptype == PieceType::Fighter);
 
@@ -828,24 +926,8 @@ impl Game {
                     self.pieces[piece_idx].loc = target_loc;
                     self.moved_this_turn.insert(self.pieces[piece_idx].id);
                     
-                    // Combat Drag Logic: Ensure deck units ride along if a transport attacks and occupies a tile
-                    if ptype == PieceType::Transport || ptype == PieceType::Carrier {
-                        let max_capacity = if ptype == PieceType::Transport { 6 } else { self.pieces[piece_idx].hits as usize };
-                        let current_cargo = self.pieces[piece_idx].cargo.len();
-                        let mut deck_space = max_capacity.saturating_sub(current_cargo);
-
-                        for i in 0..self.pieces.len() {
-                            if deck_space == 0 { break; }
-                            if i != piece_idx && self.pieces[i].loc == old_loc && self.pieces[i].owner == unit_owner && self.pieces[i].hits > 0 {
-                                let optype = self.pieces[i].ptype;
-                                if (ptype == PieceType::Transport && optype == PieceType::Army) ||
-                                   (ptype == PieceType::Carrier && optype == PieceType::Fighter) {
-                                    self.pieces[i].loc = target_loc;
-                                    deck_space -= 1;
-                                }
-                            }
-                        }
-                    }
+                    // Deck units ride along if a transport or carrier attacks and occupies a tile.
+                    self.drag_deck_cargo(piece_idx, old_loc);
                 }
                 self.pieces[piece_idx].moves_left = (self.pieces[piece_idx].moves_left - 1).max(0);
                 
@@ -878,7 +960,9 @@ impl Game {
                     let at_carrier = self.pieces.iter().any(|p| p.loc == end_loc && p.owner == unit_owner && p.ptype == PieceType::Carrier && p.hits > 0);
 
                     if at_base || at_carrier {
+                        // Landing refuels the fighter and ends its turn, as in the original.
                         self.pieces[piece_idx].fuel = 32;
+                        self.pieces[piece_idx].moves_left = 0;
                     } else if self.pieces[piece_idx].fuel <= 0 {
                         self.pieces[piece_idx].hits = 0;
                         if is_player {
@@ -910,24 +994,8 @@ impl Game {
         self.pieces[piece_idx].moves_left -= 1;
         let mut move_msg = String::new();
 
-        // Mobile Sector Drag Logic: Pull any awake units sharing the deck to the new tile
-        if ptype == PieceType::Transport || ptype == PieceType::Carrier {
-            let max_capacity = if ptype == PieceType::Transport { 6 } else { self.pieces[piece_idx].hits as usize };
-            let current_cargo = self.pieces[piece_idx].cargo.len();
-            let mut deck_space = max_capacity.saturating_sub(current_cargo);
-
-            for i in 0..self.pieces.len() {
-                if deck_space == 0 { break; }
-                if i != piece_idx && self.pieces[i].loc == old_loc && self.pieces[i].owner == unit_owner && self.pieces[i].hits > 0 {
-                    let optype = self.pieces[i].ptype;
-                    if (ptype == PieceType::Transport && optype == PieceType::Army) ||
-                       (ptype == PieceType::Carrier && optype == PieceType::Fighter) {
-                        self.pieces[i].loc = target_loc;
-                        deck_space -= 1;
-                    }
-                }
-            }
-        }
+        // Pull any awake units standing on the deck along to the new tile.
+        self.drag_deck_cargo(piece_idx, old_loc);
 
         if ptype == PieceType::Fighter {
             self.pieces[piece_idx].fuel -= 1;
@@ -935,7 +1003,10 @@ impl Game {
             let at_carrier = self.pieces.iter().any(|p| p.loc == target_loc && p.owner == unit_owner && p.ptype == PieceType::Carrier && p.hits > 0);
             
             if at_base || at_carrier {
+                // Landing refuels the fighter and ends its turn, as in the original: no
+                // touch-and-go through a city to stretch its range.
                 self.pieces[piece_idx].fuel = 32;
+                self.pieces[piece_idx].moves_left = 0;
             } else if self.pieces[piece_idx].fuel <= 0 {
                 self.pieces[piece_idx].hits = 0;
                 let msg = if is_player {
@@ -1000,7 +1071,7 @@ impl Game {
                         _ => !is_land,
                     };
 
-                    if can_enter || ptype == PieceType::Fighter {
+                    if can_enter || ptype.flies() {
                         let target_loc = Loc { r: target_r, c: target_c };
                         let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
                         
@@ -1184,7 +1255,7 @@ impl Game {
 
                         let is_land = self.map[next_loc.r][next_loc.c] == Terrain::Land;
                         let can_enter = match ptype {
-                            PieceType::Army => is_land || self.pieces.iter().any(|p| p.loc == next_loc && p.owner == Owner::Comp && p.ptype == PieceType::Transport && p.hits > 0 && p.cargo.len() < 6),
+                            PieceType::Army => is_land || self.pieces.iter().any(|p| p.loc == next_loc && p.owner == Owner::Comp && p.ptype == PieceType::Transport && self.has_room_for(p, Some(self.pieces[idx].id))),
                             PieceType::Fighter | PieceType::Satellite => true,
                             _ => !is_land || self.cities.iter().any(|c| c.loc == next_loc),
                         };
@@ -1505,17 +1576,26 @@ impl Game {
                 .map(|(_, p)| p.loc)
                 .collect();
 
-            let target_city_locs: Vec<Loc> = self.cities.iter()
-                .filter(|c| c.owner != Owner::Player && self.player_map[c.loc.r][c.loc.c] != 0)
-                .map(|c| c.loc)
-                .collect();
-
-            let mut all_targets = enemy_locs;
-            all_targets.extend(target_city_locs);
-
             let p = &self.pieces[piece_idx];
             let current_loc = p.loc;
             let ptype = p.ptype;
+
+            // Only armies can take a city. Fighters and ships that enter a neutral or enemy
+            // city are destroyed, so for them cities (and anything sheltering inside one)
+            // are not targets; otherwise they would hover beside the city until out of fuel.
+            let target_city_locs: Vec<Loc> = if ptype == PieceType::Army {
+                self.cities.iter()
+                    .filter(|c| c.owner != Owner::Player && self.player_map[c.loc.r][c.loc.c] != 0)
+                    .map(|c| c.loc)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            let mut all_targets: Vec<Loc> = enemy_locs.into_iter()
+                .filter(|&l| !self.is_fatal_city_entry(ptype, Owner::Player, l))
+                .collect();
+            all_targets.extend(target_city_locs);
 
             if ptype == PieceType::Fighter {
                 if let Some(dist) = self.dist_to_nearest_base(current_loc) {
@@ -1541,7 +1621,7 @@ impl Game {
                         _ => !is_land,
                     };
 
-                    if can_enter || p.ptype == PieceType::Fighter {
+                    if can_enter || p.ptype.flies() {
                         let target_loc = Loc { r: target_r, c: target_c };
                         let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
                         
@@ -1655,7 +1735,7 @@ impl Game {
                         _ => !is_land,
                     };
 
-                    if can_enter || ptype == PieceType::Fighter {
+                    if can_enter || ptype.flies() {
                         let target_loc = Loc { r: target_r, c: target_c };
                         let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
                         
@@ -1736,7 +1816,7 @@ impl Game {
                         _ => !is_land || friendly_city,
                     };
 
-                    if can_enter || ptype == PieceType::Fighter {
+                    if can_enter || ptype.flies() {
                         if ((!friendly_city && !self.is_tile_blocked_by_friend(step_loc, ptype, Owner::Player)) || step_loc == target_loc)
                             && !self.is_fatal_city_entry(ptype, Owner::Player, step_loc) {
                             valid_steps.push(step_loc);
@@ -1925,15 +2005,10 @@ impl Game {
     pub fn process_fill_mode(&mut self, piece_idx: usize) {
         if self.pieces[piece_idx].owner != Owner::Player || self.pieces[piece_idx].hits <= 0 { return; }
         let ptype = self.pieces[piece_idx].ptype;
-        let cargo_count = self.pieces[piece_idx].cargo.len();
-        
-        let max_cargo = match ptype {
-            PieceType::Transport => 6,
-            PieceType::Carrier => self.pieces[piece_idx].hits as usize,
-            _ => 0,
-        };
+        let capacity = ptype.capacity_for_hits(self.pieces[piece_idx].hits);
+        let cargo_count = capacity - self.free_berths(&self.pieces[piece_idx], None).min(capacity);
 
-        if cargo_count >= max_cargo {
+        if self.free_berths(&self.pieces[piece_idx], None) == 0 {
             self.pieces[piece_idx].activity = UnitActivity::Idle;
             self.pieces[piece_idx].moves_left = self.pieces[piece_idx].ptype.moves_for_hits(self.pieces[piece_idx].hits);
             self.log(format!("{:?} is fully loaded with {} units and woke up.", ptype, cargo_count));
@@ -1999,7 +2074,9 @@ impl Game {
         
         let mut target_transport = None;
         for (i, other) in self.pieces.iter().enumerate() {
-            if other.owner == Owner::Player && other.ptype == PieceType::Transport && other.cargo.len() < 6 {
+            if other.owner == Owner::Player && other.ptype == PieceType::Transport
+                && self.has_room_for(other, Some(self.pieces[piece_idx].id))
+            {
                 if self.dist(loc, other.loc) <= 1 {
                     target_transport = Some(i);
                     break;
@@ -2064,7 +2141,7 @@ impl Game {
         }
 
         if ptype == PieceType::Fighter {
-            if let Some(carrier_idx) = self.pieces.iter().position(|p| p.owner == Owner::Player && p.ptype == PieceType::Carrier && p.loc == p_loc && p.hits > 0 && p.cargo.len() < p.hits as usize) {
+            if let Some(carrier_idx) = self.pieces.iter().position(|p| p.owner == Owner::Player && p.ptype == PieceType::Carrier && p.loc == p_loc && self.has_room_for(p, Some(self.pieces[piece_idx].id))) {
                 let mut boarded_piece = self.pieces[piece_idx].clone();
                 boarded_piece.moves_left = 0;
                 boarded_piece.activity = UnitActivity::Sentry; 
@@ -2088,7 +2165,7 @@ impl Game {
             }
         }
         for (i, piece) in self.pieces.iter().enumerate() {
-            if i != piece_idx && piece.owner == Owner::Player && piece.ptype == PieceType::Carrier && piece.hits > 0 && piece.cargo.len() < piece.hits as usize {
+            if i != piece_idx && piece.owner == Owner::Player && piece.ptype == PieceType::Carrier && self.has_room_for(piece, Some(self.pieces[piece_idx].id)) {
                 valid_targets.push(piece.loc);
             }
         }
