@@ -67,7 +67,7 @@ mod tests {
             owner: Owner::Player,
             prod: PieceType::Army,
             work: 0,
-            default_orders: Vec::new(),
+            default_orders: Vec::new(), seen_owner: None,
         });
 
         let fighter = Piece {
@@ -215,7 +215,7 @@ mod tests {
         game.map = vec![vec![Terrain::Land; 10]; 10]; 
         
         game.cities.push(City {
-            loc: Loc { r: 5, c: 5 }, owner: Owner::Neutral, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+            loc: Loc { r: 5, c: 5 }, owner: Owner::Neutral, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
         });
 
         game.pieces.push(Piece {
@@ -243,15 +243,16 @@ mod tests {
             loc: Loc { r: 5, c: 5 },
             owner: Owner::Player,
             prod: PieceType::Army, 
-            work: 4,               
-            default_orders: Vec::new(),
+            work: 5,               
+            default_orders: Vec::new(), seen_owner: None,
         });
         
         let initial_pieces = game.pieces.len();
         game.process_turn();
         
         assert_eq!(game.pieces.len(), initial_pieces + 1, "New piece should spawn after work threshold is met");
-        assert_eq!(game.cities[0].work, 0, "City work should reset to 0 after production");
+        // The original's `work++ >= build_time` then `work -= build_time`: 5 + 1 - 5.
+        assert_eq!(game.cities[0].work, 1, "Surplus work should carry over after production");
         
         let new_piece = game.pieces.last().unwrap();
         assert_eq!(new_piece.ptype, PieceType::Army, "Produced unit should match city production target");
@@ -262,7 +263,7 @@ mod tests {
     fn test_turn_port_healing() {
         let mut game = Game::new(10, 10, 50);
         game.cities.push(City { 
-            loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new() 
+            loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None 
         });
         
         game.pieces.push(Piece {
@@ -392,7 +393,7 @@ mod tests {
                     cargo: Vec::new(), fuel: 0,
                 });
                 game.cities.push(City {
-                    loc: Loc { r: 5, c: 6 }, owner, prod: PieceType::Army, work: 5, default_orders: Vec::new(),
+                    loc: Loc { r: 5, c: 6 }, owner, prod: PieceType::Army, work: 5, default_orders: Vec::new(), seen_owner: None,
                 });
 
                 let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
@@ -412,7 +413,7 @@ mod tests {
         game.map[5][6] = Terrain::Land;
         game.pieces.push(test_piece(1, PieceType::Destroyer, Owner::Player, 5, 5));
         game.cities.push(City {
-            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
         });
         let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
         assert_eq!(result, MoveResult::Moved);
@@ -427,7 +428,7 @@ mod tests {
             game.map[5][6] = Terrain::Land;
             game.pieces.push(test_piece(1, PieceType::Fighter, Owner::Player, 5, 5));
             game.cities.push(City {
-                loc: Loc { r: 5, c: 6 }, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+                loc: Loc { r: 5, c: 6 }, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
             });
             let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
             assert_eq!(result, MoveResult::CombatLost);
@@ -442,7 +443,7 @@ mod tests {
         game.map[5][6] = Terrain::Land;
         game.pieces.push(test_piece(1, PieceType::Fighter, Owner::Player, 5, 5));
         game.cities.push(City {
-            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
         });
         let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
         assert_eq!(result, MoveResult::Moved);
@@ -459,7 +460,7 @@ mod tests {
         f.activity = UnitActivity::Dir(0, 1);
         game.pieces.push(f);
         game.cities.push(City {
-            loc: Loc { r: 5, c: 6 }, owner: Owner::Comp, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+            loc: Loc { r: 5, c: 6 }, owner: Owner::Comp, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
         });
         game.dir_piece(0);
         assert!(game.pieces[0].hits > 0, "fighter must survive");
@@ -473,7 +474,7 @@ mod tests {
         game.map = vec![vec![Terrain::Sea; 10]; 10];
         game.map[5][6] = Terrain::Land;
         game.cities.push(City {
-            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
         });
         game.pieces.push(test_piece(1, PieceType::Destroyer, Owner::Comp, 5, 5));
         game.pieces.push(test_piece(2, PieceType::Fighter, Owner::Comp, 5, 4));
@@ -524,7 +525,7 @@ mod tests {
         let mut game = Game::new(10, 10, 50);
         game.map = vec![vec![Terrain::Sea; 10]; 10];
         
-        game.cities.push(City { loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
+        game.cities.push(City { loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None });
 
         for i in 0..6 {
             game.pieces.push(Piece {
@@ -622,7 +623,7 @@ mod tests {
         
         game.cities.push(City { 
             loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, 
-            default_orders: vec![(PieceType::Army, UnitActivity::Sentry)] 
+            default_orders: vec![(PieceType::Army, UnitActivity::Sentry)], seen_owner: None
         });
         
         game.default_orders = vec![(PieceType::Army, UnitActivity::Explore)];
@@ -784,7 +785,7 @@ mod tests {
 
         // Player City at (1,1)
         game.cities.push(City {
-            loc: Loc { r: 1, c: 1 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
+            loc: Loc { r: 1, c: 1 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
         });
 
         // Comp Army at (8,8)
@@ -809,8 +810,8 @@ mod tests {
     fn test_game_over_conditions() {
         let mut game = Game::new(10, 10, 50);
 
-        game.cities.push(City { loc: Loc { r: 0, c: 0 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
-        game.cities.push(City { loc: Loc { r: 0, c: 1 }, owner: Owner::Comp, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
+        game.cities.push(City { loc: Loc { r: 0, c: 0 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None });
+        game.cities.push(City { loc: Loc { r: 0, c: 1 }, owner: Owner::Comp, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None });
 
         game.pieces.push(Piece { id: 1, ptype: PieceType::Army, owner: Owner::Player, loc: Loc { r: 1, c: 0 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle, cargo: Vec::new(), fuel: 0 });
         game.pieces.push(Piece { id: 2, ptype: PieceType::Army, owner: Owner::Comp, loc: Loc { r: 1, c: 1 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle, cargo: Vec::new(), fuel: 0 });
@@ -868,7 +869,7 @@ mod tests {
             owner: Owner::Player,
             prod: PieceType::Army,
             work: 0,
-            default_orders: Vec::new(),
+            default_orders: Vec::new(), seen_owner: None,
         });
         
         // Fighter exploring far away. Distance to base = 6.
@@ -944,7 +945,7 @@ mod tests {
             owner: Owner::Player,
             prod: PieceType::Army,
             work: PieceType::Army.build_cost() - 1,
-            default_orders: Vec::new(),
+            default_orders: Vec::new(), seen_owner: None,
         });
 
         game.process_turn(); // city completes an Army
@@ -965,13 +966,13 @@ mod tests {
             loc: Loc { r: 2, c: 2 },
             owner: Owner::Player,
             prod: PieceType::Army,
-            work: PieceType::Army.build_cost() - 1,
-            default_orders: Vec::new(),
+            work: PieceType::Army.build_cost(),
+            default_orders: Vec::new(), seen_owner: None,
         });
         game.process_turn();
         let first_id = game.pieces.last().unwrap().id;
         game.pieces.retain(|p| p.id != first_id); // that piece dies
-        game.cities[0].work = PieceType::Army.build_cost() - 1;
+        game.cities[0].work = PieceType::Army.build_cost();
         game.process_turn();
         let second_id = game.pieces.last().unwrap().id;
         assert!(second_id > first_id, "id {} was reused", second_id);
@@ -1130,7 +1131,7 @@ mod tests {
             owner: Owner::Comp,
             prod: PieceType::Destroyer,
             work: 7,
-            default_orders: vec![(PieceType::Army, UnitActivity::Sentry)],
+            default_orders: vec![(PieceType::Army, UnitActivity::Sentry)], seen_owner: None,
         });
         game.pieces.push(test_piece(1, PieceType::Army, Owner::Player, 5, 4)); // attacker
         game.pieces.push(test_piece(2, PieceType::Army, Owner::Comp, 5, 5));
@@ -1453,7 +1454,7 @@ mod tests {
     fn port_world(ptype: PieceType, hits: i32, owner: Owner) -> Game {
         let mut game = Game::new(10, 10, 50);
         game.map = vec![vec![Terrain::Sea; 10]; 10];
-        game.cities.push(City { loc: Loc { r: 5, c: 5 }, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
+        game.cities.push(City { loc: Loc { r: 5, c: 5 }, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None });
         let mut ship = test_piece(1, ptype, owner, 5, 5);
         ship.hits = hits;
         ship.activity = UnitActivity::Idle;
@@ -1604,7 +1605,7 @@ mod tests {
         game.map = vec![vec![Terrain::Sea; 10]; 10];
         for loc in [Loc { r: 0, c: 5 }, Loc { r: 4, c: 4 }] {
             game.map[loc.r][loc.c] = Terrain::Land;
-            game.cities.push(City { loc, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
+            game.cities.push(City { loc, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None });
         }
         game
     }
@@ -1949,15 +1950,17 @@ mod tests {
     }
 
     #[test]
-    fn test_satellites_do_not_wrap_on_a_torus() {
+    fn test_satellites_bounce_rather_than_wrap_on_a_torus() {
         let mut game = torus_game(10, 12);
-        let mut sat = test_piece(1, PieceType::Satellite, Owner::Player, 5, 11);
-        sat.activity = UnitActivity::Dir(0, 1);
-        sat.moves_left = 10;
+        let mut sat = test_piece(1, PieceType::Satellite, Owner::Player, 5, 9);
+        sat.activity = UnitActivity::Dir(-1, 1);
         sat.fuel = 20;
         game.pieces.push(sat);
-        game.dir_piece(0);
-        assert!(game.pieces[0].hits <= 0, "a satellite leaving the board is lost, torus or not");
+        game.move_satellites();
+        let sat = &game.pieces[0];
+        assert!(sat.hits > 0);
+        assert!((1..=8).contains(&sat.loc.r) && (1..=10).contains(&sat.loc.c), "left the playable map: {:?}", sat.loc);
+        assert!(matches!(sat.activity, UnitActivity::Dir(_, -1)), "should have bounced off the east edge: {:?}", sat.activity);
     }
 
     #[test]
@@ -2033,7 +2036,7 @@ mod tests {
     }
 
     fn city(loc: Loc, owner: Owner) -> City {
-        City { loc, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new() }
+        City { loc, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None }
     }
 
     #[test]
@@ -2163,5 +2166,178 @@ mod tests {
         game.attempt_move(1, Loc { r: 5, c: 6 });
         assert_eq!(game.pieces[1].fuel, 32);
         assert_eq!(game.pieces[1].moves_left, 0);
+    }
+
+    // ---- fog of war ----
+
+    /// A 12x12 sea world with a player destroyer at (5,2) (sight 4) and everything explored.
+    fn fog_world() -> Game {
+        let mut game = Game::with_seed(12, 12, 50, 1);
+        for row in game.player_map.iter_mut() { for v in row.iter_mut() { *v = 1; } }
+        game.pieces.push(unit(1, PieceType::Destroyer, Owner::Player, 5, 2));
+        game
+    }
+
+    #[test]
+    fn test_enemies_on_explored_squares_out_of_sight_are_hidden() {
+        let mut game = fog_world();
+        game.pieces.push(unit(2, PieceType::Battleship, Owner::Comp, 5, 10)); // 8 away
+        assert!(!game.is_visible_to(1, Owner::Player), "explored is not the same as in sight");
+        game.pieces[1].loc = Loc { r: 5, c: 6 }; // 4 away
+        assert!(game.is_visible_to(1, Owner::Player));
+    }
+
+    #[test]
+    fn test_last_seen_enemy_is_remembered_until_looked_at_again() {
+        let mut game = fog_world();
+        game.pieces.push(unit(2, PieceType::Battleship, Owner::Comp, 5, 5));
+        game.refresh_player_view();
+        assert_eq!(game.player_view[5][5], b'b');
+
+        // The destroyer leaves, then the battleship sails off unseen: the player still
+        // remembers it where it was.
+        game.pieces[0].loc = Loc { r: 5, c: 0 };
+        game.pieces[1].loc = Loc { r: 5, c: 10 };
+        game.refresh_player_view();
+        assert_eq!(game.player_view[5][5], b'b', "out-of-date memory, as in the original");
+        assert_eq!(game.player_view[5][10], 0, "never seen there");
+
+        // The destroyer comes over for a look: the square is seen empty and forgotten.
+        game.pieces[0].loc = Loc { r: 5, c: 7 };
+        game.refresh_player_view();
+        assert_eq!(game.player_view[5][5], 0);
+        assert_eq!(game.player_view[5][10], b'b');
+    }
+
+    #[test]
+    fn test_city_owner_out_of_sight_is_as_last_seen() {
+        let mut game = fog_world();
+        game.map[5][9] = Terrain::Land;
+        game.cities.push(city(Loc { r: 5, c: 9 }, Owner::Neutral));
+        game.pieces[0].loc = Loc { r: 5, c: 6 };
+        game.refresh_player_view();
+        game.pieces[0].loc = Loc { r: 5, c: 1 };
+        game.cities[0].owner = Owner::Comp; // taken while nobody was watching
+        game.refresh_player_view();
+        assert_eq!(game.known_city_owner(&game.cities[0], None), Some(Owner::Neutral));
+        game.pieces[0].loc = Loc { r: 5, c: 6 };
+        game.refresh_player_view();
+        assert_eq!(game.known_city_owner(&game.cities[0], None), Some(Owner::Comp));
+    }
+
+    #[test]
+    fn test_losing_a_city_is_known_even_out_of_sight() {
+        let mut game = Game::with_seed(10, 10, 50, 2);
+        game.map = vec![vec![Terrain::Land; 10]; 10];
+        game.cities.push(city(Loc { r: 5, c: 5 }, Owner::Player));
+        game.pieces.push(unit(1, PieceType::Army, Owner::Comp, 5, 6));
+        // Keep attacking until the coin flip goes the computer's way.
+        while game.cities[0].owner == Owner::Player {
+            game.pieces[0].hits = 1;
+            game.attempt_move(0, Loc { r: 5, c: 5 });
+        }
+        assert_eq!(game.known_city_owner(&game.cities[0], None), Some(Owner::Comp));
+    }
+
+    #[test]
+    fn test_old_saves_get_a_remembered_view() {
+        let mut game = fog_world();
+        game.map[5][3] = Terrain::Land;
+        game.cities.push(city(Loc { r: 5, c: 3 }, Owner::Comp));
+        let (path, mut v) = save_to_json(&game, "fog_v1.sav");
+        v["save_version"] = serde_json::json!(1);
+        v.as_object_mut().unwrap().remove("player_view");
+        v["cities"][0].as_object_mut().unwrap().remove("seen_owner");
+        write_json(&path, &v);
+        let loaded = Game::load_game(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.player_view.len(), 12);
+        assert_eq!(loaded.cities[0].seen_owner, Some(Owner::Comp));
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ---- satellites ----
+
+    #[test]
+    fn test_new_satellite_flies_a_diagonal_by_itself() {
+        let mut game = Game::with_seed(30, 30, 50, 4);
+        game.cities.push(city(Loc { r: 15, c: 15 }, Owner::Player));
+        game.cities[0].prod = PieceType::Satellite;
+        game.cities[0].work = PieceType::Satellite.build_cost();
+        game.process_turn();
+        let sat = game.pieces.iter().find(|p| p.ptype == PieceType::Satellite).expect("satellite built");
+        assert!(crate::game::SAT_DIRS.contains(&sat.activity), "{:?}", sat.activity);
+        assert_eq!(sat.fuel, crate::game::SATELLITE_LIFE - 1, "one turn of its life used");
+        assert_eq!(game.dist(sat.loc, Loc { r: 15, c: 15 }), 10, "moved its full 10 squares");
+        assert_eq!(sat.moves_left, 0, "nothing left for the player to order");
+    }
+
+    #[test]
+    fn test_satellite_bounces_off_the_map_edge() {
+        let mut game = Game::with_seed(40, 40, 50, 1);
+        let mut sat = unit(1, PieceType::Satellite, Owner::Player, 2, 10);
+        sat.activity = UnitActivity::Dir(-1, 1); // NE, about to hit the top edge
+        game.pieces.push(sat);
+        game.move_satellites();
+        let sat = &game.pieces[0];
+        // (2,10) -> (1,11); then NE is off the map and so is NW, so it turns SE for 9 more.
+        assert_eq!(sat.activity, UnitActivity::Dir(1, 1), "NE off the top bounces to SE");
+        assert_eq!(sat.loc, Loc { r: 10, c: 20 });
+        assert!(sat.hits > 0);
+    }
+
+    #[test]
+    fn test_satellite_in_a_corner_turns_straight_back() {
+        let mut game = Game::with_seed(20, 20, 50, 1);
+        let mut sat = unit(1, PieceType::Satellite, Owner::Player, 1, 18);
+        sat.activity = UnitActivity::Dir(-1, 1);
+        game.pieces.push(sat);
+        game.move_satellites();
+        assert_eq!(game.pieces[0].activity, UnitActivity::Dir(1, -1));
+        assert_eq!(game.pieces[0].loc, Loc { r: 11, c: 8 });
+    }
+
+    // ---- production ----
+
+    #[test]
+    fn test_changing_production_costs_a_fifth_of_the_build_time() {
+        let mut game = Game::new(10, 10, 50);
+        game.cities.push(city(Loc { r: 5, c: 5 }, Owner::Player));
+        game.cities[0].work = 4;
+        game.set_production(0, PieceType::Transport, false);
+        assert_eq!(game.cities[0].work, -6, "progress lost and 30/5 turns of retooling");
+        game.cities[0].work = 3;
+        game.set_production(0, PieceType::Transport, false);
+        assert_eq!(game.cities[0].work, 3, "keeping the same production costs nothing");
+        game.set_production(0, PieceType::Transport, true);
+        assert_eq!(game.cities[0].work, -6, "a newly won city always starts by retooling");
+    }
+
+    #[test]
+    fn test_first_army_after_retooling_takes_seven_turns_then_five() {
+        let mut game = Game::new(10, 10, 50);
+        game.cities.push(city(Loc { r: 5, c: 5 }, Owner::Player));
+        game.set_production(0, PieceType::Army, true);
+        let mut built_on = Vec::new();
+        for turn in 1..=12 {
+            game.process_turn();
+            if game.pieces.len() > built_on.len() {
+                built_on.push(turn);
+            }
+        }
+        assert_eq!(built_on, vec![7, 12], "as in the original: -1 work, then work++ >= 5");
+    }
+
+    #[test]
+    fn test_computer_capture_pays_retooling() {
+        let mut game = Game::with_seed(10, 10, 50, 2);
+        game.map = vec![vec![Terrain::Land; 10]; 10];
+        game.cities.push(city(Loc { r: 5, c: 5 }, Owner::Neutral));
+        game.pieces.push(unit(1, PieceType::Army, Owner::Comp, 5, 6));
+        while game.cities[0].owner == Owner::Neutral {
+            game.pieces[0].hits = 1;
+            game.attempt_move(0, Loc { r: 5, c: 5 });
+        }
+        assert_eq!(game.cities[0].prod, PieceType::Army);
+        assert_eq!(game.cities[0].work, -1);
     }
 }
