@@ -203,6 +203,511 @@ fn start_session(opts: Options) -> io::Result<Option<(Game, i32)>> {
     Ok(Some((game, autosave_interval)))
 }
 
+/// One iteration of the map editor: draw, then handle at most one mouse/key event.
+/// Returns `Ok(true)` if the player chose to quit the whole program.
+fn edit_mode_step(game: &mut Game) -> io::Result<bool> {
+    let edit_prompt = "[Arrows/NumPad] Move | [P]rod | [O]rders | [W]ake | e[X]ject | [I]nitial Orders | [E]xit Edit: ";
+    disp::refresh_display_with_input(game, edit_prompt);
+
+    if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+        if let Ok(ev) = event::read() {
+            if let Event::Mouse(mouse) = ev {
+                match mouse.kind {
+                    crossterm::event::MouseEventKind::ScrollUp => game.msg_scroll = game.msg_scroll.saturating_add(1),
+                    crossterm::event::MouseEventKind::ScrollDown => game.msg_scroll = game.msg_scroll.saturating_sub(1),
+                    crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                        game.last_mouse_coord = Some((mouse.column, mouse.row));
+                    }
+                    crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                        game.last_mouse_coord = None;
+                    }
+                    crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                        let mut current = game.viewport_center.unwrap_or(game.edit_cursor);
+                        if let Some((last_c, last_r)) = game.last_mouse_coord {
+                            let dc = mouse.column as i32 - last_c as i32;
+                            let dr = mouse.row as i32 - last_r as i32;
+                            current.c = (current.c as i32 - dc).clamp(0, game.cols as i32 - 1) as usize;
+                            current.r = (current.r as i32 - dr).clamp(0, game.rows as i32 - 1) as usize;
+                            game.viewport_center = Some(current);
+                        }
+                        game.last_mouse_coord = Some((mouse.column, mouse.row));
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Event::Key(key) = ev {
+                game.viewport_center = None;
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    if prompt_quit_confirmation(game) {
+                        return Ok(true);
+                    } else {
+                        game.log(String::from("Quit cancelled."));
+                        return Ok(false);
+                    }
+                }
+
+                match key.code {
+                    KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Esc => {
+                        game.mode = GameMode::Manual;
+                        game.log(String::from("Exited Edit Mode."));
+                        while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                            let _ = event::read();
+                        }
+                    }
+                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                        if let Some(c_idx) = game.cities.iter().position(|c| c.loc == game.edit_cursor && c.owner == Owner::Player) {
+                            prompt_city_production(game, c_idx);
+                        } else {
+                            game.log(String::from("No player-owned city at cursor location."));
+                        }
+                    }
+                    KeyCode::Char('w') | KeyCode::Char('W') => {
+                        let prompt = "Wake units at cursor: [A]rmy,[T]rns,[P]tBoat,[D]est,[S]ub,[C]arr,[B]ttle,[F]ght,[Z]Sat or [*]All: ";
+                        disp::refresh_display_with_input(game, prompt);
+
+                        let mut target_ptype = None;
+                        let mut wake_all = false;
+
+                        loop {
+                            if let Ok(Event::Key(k)) = event::read() {
+                                if k.code == KeyCode::Esc { break; }
+                                if let KeyCode::Char(c) = k.code {
+                                    if c == '*' { wake_all = true; break; }
+                                    target_ptype = match c.to_ascii_lowercase() {
+                                        'a' => Some(PieceType::Army),
+                                        't' => Some(PieceType::Transport),
+                                        'p' => Some(PieceType::PatrolBoat),
+                                        'd' => Some(PieceType::Destroyer),
+                                        's' => Some(PieceType::Submarine),
+                                        'c' => Some(PieceType::Carrier),
+                                        'b' => Some(PieceType::Battleship),
+                                        'f' => Some(PieceType::Fighter),
+                                        'z' | 'l' => Some(PieceType::Satellite),
+                                        _ => None,
+                                    };
+                                    if target_ptype.is_some() { break; }
+                                }
+                            }
+                        }
+
+                        if wake_all || target_ptype.is_some() {
+                            let mut woke = 0;
+                            let mut cargo_carriers = Vec::new();
+                            for (i, p) in game.pieces.iter_mut().enumerate() {
+                                if p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0 {
+                                    if wake_all || Some(p.ptype) == target_ptype {
+                                        if p.activity != UnitActivity::Idle {
+                                            p.activity = UnitActivity::Idle;
+                                            woke += 1;
+                                        }
+                                        if !p.cargo.is_empty() {
+                                            cargo_carriers.push(i);
+                                        }
+                                    }
+                                }
+                            }
+                            for i in cargo_carriers {
+                                game.wake_cargo(i);
+                            }
+                            if woke > 0 {
+                                game.log(format!("Awakened {} unit(s) at cursor.", woke));
+                            } else {
+                                game.log(String::from("No resting player units of that type at cursor."));
+                            }
+                        } else {
+                            game.log(String::from("Wake cancelled."));
+                        }
+                    }
+                    KeyCode::Char('x') | KeyCode::Char('X') => {
+                        let mut cargo_carriers = Vec::new();
+                        for (i, p) in game.pieces.iter().enumerate() {
+                            if p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0 && !p.cargo.is_empty() {
+                                cargo_carriers.push(i);
+                            }
+                        }
+                        if cargo_carriers.is_empty() {
+                            game.log(String::from("No transports/carriers with cargo at cursor."));
+                        } else {
+                            for i in cargo_carriers {
+                                game.wake_cargo(i);
+                            }
+                        }
+                    }
+                    KeyCode::Char('o') | KeyCode::Char('O') => {
+                        if let Some(p_idx) = game.pieces.iter().position(|p| p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0) {
+                            let ptype = game.pieces[p_idx].ptype;
+
+                            let mut opts = vec!["[S]entry", "[Y]attack", "[G]rope", "[D]est", "[R]nd", "[V]ctr", "[W]ake"];
+                            if ptype == PieceType::Army { opts.push("[T]rnsWait"); }
+                            if ptype == PieceType::Fighter { opts.push("[L]and"); }
+                            if ptype == PieceType::Transport || ptype == PieceType::Carrier { opts.push("[F]ill"); }
+                            if ptype.is_naval() { opts.push("[U]pgrade"); }
+
+                            let prompt = format!("Order {:?} - {}: ", ptype, opts.join(","));
+                            disp::refresh_display_with_input(game, &prompt);
+                            let mut new_act = None;
+                            loop {
+                                if let Ok(Event::Key(k)) = event::read() {
+                                    if k.code == KeyCode::Esc { break; }
+                                    if let KeyCode::Char(c) = k.code {
+                                        let choice = c.to_ascii_lowercase();
+
+                                        let valid = match choice {
+                                            's' | 'y' | 'g' | 'd' | 'r' | 'v' | 'w' => true,
+                                            't' => ptype == PieceType::Army,
+                                            'l' => ptype == PieceType::Fighter,
+                                            'f' => ptype == PieceType::Transport || ptype == PieceType::Carrier,
+                                            'u' => ptype.is_naval(),
+                                            _ => false,
+                                        };
+                                        if !valid { continue; }
+                                        if choice == 'v' {
+                                            let dir_prompt = format!("Set march direction for {:?} [Arrows/NumPad] or [Esc] Cancel: ", ptype);
+                                            disp::refresh_display_with_input(game, &dir_prompt);
+                                            let mut chosen_dir = None;
+                                            loop {
+                                                if let Ok(Event::Key(dk)) = event::read() {
+                                                    if dk.code == KeyCode::Esc { break; }
+                                                    match dk.code {
+                                                        KeyCode::Char('8') | KeyCode::Up => { chosen_dir = Some((-1, 0)); break; }
+                                                        KeyCode::Char('2') | KeyCode::Down => { chosen_dir = Some((1, 0)); break; }
+                                                        KeyCode::Char('4') | KeyCode::Left => { chosen_dir = Some((0, -1)); break; }
+                                                        KeyCode::Char('6') | KeyCode::Right => { chosen_dir = Some((0, 1)); break; }
+                                                        KeyCode::Char('7') => { chosen_dir = Some((-1, -1)); break; }
+                                                        KeyCode::Char('9') => { chosen_dir = Some((-1, 1)); break; }
+                                                        KeyCode::Char('1') => { chosen_dir = Some((1, -1)); break; }
+                                                        KeyCode::Char('3') => { chosen_dir = Some((1, 1)); break; }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            if let Some((dr, dc)) = chosen_dir {
+                                                new_act = Some(UnitActivity::Dir(dr, dc));
+                                                break;
+                                            }
+                                        } else if choice == 'd' {
+                                            let dest_prompt = format!("Pick destination for {:?} [Arrows/NumPad] Move | [Enter] Confirm | [Esc] Cancel: ", ptype);
+                                            let mut chosen_dest = None;
+                                            let original_cursor = game.edit_cursor;
+                                            loop {
+                                                disp::refresh_display_with_input(game, &dest_prompt);
+                                                if let Ok(Event::Key(dk)) = event::read() {
+                                                    if dk.code == KeyCode::Esc {
+                                                        game.edit_cursor = original_cursor;
+                                                        break;
+                                                    } else if dk.code == KeyCode::Enter {
+                                                        chosen_dest = Some(game.edit_cursor);
+                                                        game.edit_cursor = original_cursor;
+                                                        break;
+                                                    } else {
+                                                        match dk.code {
+                                                            KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
+                                                            KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
+                                                            KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
+                                                            KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
+                                                            KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
+                                                            KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                                                            KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
+                                                            KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if let Some(dest) = chosen_dest {
+                                                new_act = Some(UnitActivity::Dest(dest));
+                                                break;
+                                            }
+                                        } else {
+                                            new_act = match choice {
+                                                's' => Some(UnitActivity::Sentry),
+                                                'y' => Some(UnitActivity::Attack),
+                                                'g' => Some(UnitActivity::Explore),
+                                                'w' => Some(UnitActivity::Idle),
+                                                'f' => Some(UnitActivity::Fill),
+                                                'l' => Some(UnitActivity::Land),
+                                                'r' => Some(UnitActivity::Random),
+                                                't' => Some(UnitActivity::TransportWait),
+                                                'u' => Some(UnitActivity::Upgrade),
+                                                _ => None,
+                                            };
+                                            if new_act.is_some() { break; }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(act) = new_act {
+                                game.pieces[p_idx].activity = act;
+                                game.log(format!("Order applied manually to {:?} at cursor.", ptype));
+                            } else {
+                                game.log(String::from("Order update cancelled."));
+                            }
+                        } else {
+                            game.log(String::from("No player unit at cursor location."));
+                        }
+                    }
+                    KeyCode::Char('i') | KeyCode::Char('I') => {
+                        let mut edit_global = false;
+                        let mut edit_c_idx = None;
+
+                        if let Some(c_idx) = game.cities.iter().position(|c| c.loc == game.edit_cursor && c.owner == Owner::Player) {
+                            let prompt = "Edit [L]ocal City Order or [G]lobal Fallback? (Esc to cancel): ";
+                            disp::refresh_display_with_input(game, prompt);
+                            loop {
+                                if let Ok(Event::Key(k)) = event::read() {
+                                    if k.code == KeyCode::Esc { break; }
+                                    if let KeyCode::Char(c) = k.code {
+                                        match c.to_ascii_lowercase() {
+                                            'l' => { edit_c_idx = Some(c_idx); break; }
+                                            'g' => { edit_global = true; break; }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            let prompt = "No city here. Edit [G]lobal Fallback? (Y/N): ";
+                            disp::refresh_display_with_input(game, prompt);
+                            loop {
+                                if let Ok(Event::Key(k)) = event::read() {
+                                    if k.code == KeyCode::Esc { break; }
+                                    if let KeyCode::Char(c) = k.code {
+                                        match c.to_ascii_lowercase() {
+                                            'y' | 'g' => { edit_global = true; break; }
+                                            'n' => { break; }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if edit_global || edit_c_idx.is_some() {
+                            let mode_str = if edit_global { "GLOBAL" } else { "LOCAL" };
+                            let prompt = format!("{} Order? [A]rmy,[T]rns,[P]tBoat,[D]est,[S]ub,[C]arr,[B]ttle,[F]ght,[Z]Sat: ", mode_str);
+                            disp::refresh_display_with_input(game, &prompt);
+
+                            let mut selected_ptype = None;
+                            loop {
+                                if let Ok(Event::Key(k)) = event::read() {
+                                    if k.code == KeyCode::Esc { break; }
+                                    if let KeyCode::Char(c) = k.code {
+                                        selected_ptype = match c.to_ascii_lowercase() {
+                                            'a' => Some(PieceType::Army),
+                                            't' => Some(PieceType::Transport),
+                                            'p' => Some(PieceType::PatrolBoat),
+                                            'd' => Some(PieceType::Destroyer),
+                                            's' => Some(PieceType::Submarine),
+                                            'c' => Some(PieceType::Carrier),
+                                            'b' => Some(PieceType::Battleship),
+                                            'f' => Some(PieceType::Fighter),
+                                            'z' | 'l' => Some(PieceType::Satellite),
+                                            _ => None,
+                                        };
+                                        if selected_ptype.is_some() { break; }
+                                    }
+                                }
+                            }
+
+                            if let Some(ptype) = selected_ptype {
+                                let mut opts = vec!["[S]entry", "[Y]attack", "[G]rope", "[D]est", "[R]nd", "[V]ctr", "[W]ake"];
+                                if ptype == PieceType::Army { opts.push("[T]rnsWait"); }
+                                if ptype == PieceType::Fighter { opts.push("[L]and"); }
+                                if ptype == PieceType::Transport || ptype == PieceType::Carrier { opts.push("[F]ill"); }
+                                if ptype.is_naval() { opts.push("[U]pgrade"); }
+
+                                let prompt2 = format!("{} Order for {:?} - {}: ", mode_str, ptype, opts.join(","));
+                                disp::refresh_display_with_input(game, &prompt2);
+                                let mut new_act = None;
+                                loop {
+                                    if let Ok(Event::Key(k)) = event::read() {
+                                        if k.code == KeyCode::Esc { break; }
+                                        if let KeyCode::Char(c) = k.code {
+                                            let choice = c.to_ascii_lowercase();
+
+                                            let valid = match choice {
+                                                's' | 'y' | 'g' | 'd' | 'r' | 'v' | 'w' => true,
+                                                't' => ptype == PieceType::Army,
+                                                'l' => ptype == PieceType::Fighter,
+                                                'f' => ptype == PieceType::Transport || ptype == PieceType::Carrier,
+                                                'u' => ptype.is_naval(),
+                                                _ => false,
+                                            };
+                                            if !valid { continue; }
+                                            if choice == 'v' {
+                                                let dir_prompt = format!("Set march direction for {:?} [Arrows/NumPad] or [Esc] Cancel: ", ptype);
+                                                disp::refresh_display_with_input(game, &dir_prompt);
+                                                let mut chosen_dir = None;
+                                                loop {
+                                                    if let Ok(Event::Key(dk)) = event::read() {
+                                                        if dk.code == KeyCode::Esc { break; }
+                                                        match dk.code {
+                                                            KeyCode::Char('8') | KeyCode::Up => { chosen_dir = Some((-1, 0)); break; }
+                                                            KeyCode::Char('2') | KeyCode::Down => { chosen_dir = Some((1, 0)); break; }
+                                                            KeyCode::Char('4') | KeyCode::Left => { chosen_dir = Some((0, -1)); break; }
+                                                            KeyCode::Char('6') | KeyCode::Right => { chosen_dir = Some((0, 1)); break; }
+                                                            KeyCode::Char('7') => { chosen_dir = Some((-1, -1)); break; }
+                                                            KeyCode::Char('9') => { chosen_dir = Some((-1, 1)); break; }
+                                                            KeyCode::Char('1') => { chosen_dir = Some((1, -1)); break; }
+                                                            KeyCode::Char('3') => { chosen_dir = Some((1, 1)); break; }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
+                                                if let Some((dr, dc)) = chosen_dir {
+                                                    new_act = Some(UnitActivity::Dir(dr, dc));
+                                                    break;
+                                                }
+                                            } else if choice == 'd' {
+                                                let dest_prompt = format!("Pick destination for {:?} [Arrows/NumPad] Move | [Enter] Confirm | [Esc] Cancel: ", ptype);
+                                                let mut chosen_dest = None;
+                                                let original_cursor = game.edit_cursor;
+                                                loop {
+                                                    disp::refresh_display_with_input(game, &dest_prompt);
+                                                    if let Ok(Event::Key(dk)) = event::read() {
+                                                        if dk.code == KeyCode::Esc {
+                                                            game.edit_cursor = original_cursor;
+                                                            break;
+                                                        } else if dk.code == KeyCode::Enter {
+                                                            chosen_dest = Some(game.edit_cursor);
+                                                            game.edit_cursor = original_cursor;
+                                                            break;
+                                                        } else {
+                                                            match dk.code {
+                                                                KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
+                                                                KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
+                                                                KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
+                                                                KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
+                                                                KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
+                                                                KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                                                                KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
+                                                                KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                                                                _ => {}
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if let Some(dest) = chosen_dest {
+                                                    new_act = Some(UnitActivity::Dest(dest));
+                                                    break;
+                                                }
+                                            } else {
+                                                new_act = match choice {
+                                                    's' => Some(UnitActivity::Sentry),
+                                                    'y' => Some(UnitActivity::Attack),
+                                                    'g' => Some(UnitActivity::Explore),
+                                                    'w' => Some(UnitActivity::Idle),
+                                                    'f' => Some(UnitActivity::Fill),
+                                                    'l' => Some(UnitActivity::Land),
+                                                    'r' => Some(UnitActivity::Random),
+                                                    't' => Some(UnitActivity::TransportWait),
+                                                    'u' => Some(UnitActivity::Upgrade),
+                                                    _ => None,
+                                                };
+                                                if new_act.is_some() { break; }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Some(act) = new_act {
+                                    if edit_global {
+                                        if let Some(idx) = game.default_orders.iter().position(|(p, _)| *p == ptype) {
+                                            game.default_orders[idx].1 = act;
+                                        } else {
+                                            game.default_orders.push((ptype, act));
+                                        }
+
+                                        let mut updated_indices = Vec::new();
+                                        for city in &game.cities {
+                                            if city.owner == Owner::Player {
+                                                if !city.default_orders.iter().any(|(p, _)| *p == ptype) {
+                                                    let c_loc = city.loc;
+                                                    for (i, p) in game.pieces.iter_mut().enumerate() {
+                                                        let is_awaiting = matches!(p.activity, UnitActivity::Idle | UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dir(_, _) | UnitActivity::Dest(_));
+                                                        if p.loc == c_loc && p.owner == Owner::Player && p.ptype == ptype && p.hits > 0 && is_awaiting {
+                                                            p.activity = act;
+                                                            updated_indices.push(i);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        game.log(format!("GLOBAL default order for {:?} set to {:?} (Applied to {} units).", ptype, act, updated_indices.len()));
+
+                                        for idx in updated_indices {
+                                            match act {
+                                                UnitActivity::Explore => game.explore_piece(idx),
+                                                UnitActivity::Attack => game.attack_piece(idx),
+                                                UnitActivity::Random => game.random_piece(idx),
+                                                UnitActivity::Dest(_) => game.dest_piece(idx),
+                                                UnitActivity::Dir(_, _) => game.dir_piece(idx),
+                                                UnitActivity::Fill => game.process_fill_mode(idx),
+                                                UnitActivity::Upgrade => game.process_upgrade_mode(idx),
+                                                UnitActivity::Land => game.process_land_mode(idx),
+                                                _ => {}
+                                            }
+                                        }
+                                        game.pieces.retain(|p| p.hits > 0);
+                                    } else if let Some(c_idx) = edit_c_idx {
+                                        if let Some(idx) = game.cities[c_idx].default_orders.iter().position(|(p, _)| *p == ptype) {
+                                            game.cities[c_idx].default_orders[idx].1 = act;
+                                        } else {
+                                            game.cities[c_idx].default_orders.push((ptype, act));
+                                        }
+                                        let mut updated_indices = Vec::new();
+                                        let city_loc = game.cities[c_idx].loc;
+                                        for (i, p) in game.pieces.iter_mut().enumerate() {
+                                            let is_awaiting = matches!(p.activity, UnitActivity::Idle | UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dir(_, _) | UnitActivity::Dest(_));
+                                            if p.loc == city_loc && p.owner == Owner::Player && p.ptype == ptype && p.hits > 0 && is_awaiting {
+                                                p.activity = act;
+                                                updated_indices.push(i);
+                                            }
+                                        }
+                                        game.log(format!("LOCAL City({},{}) order for {:?} set to {:?} (Applied to {} stacked units).", game.cities[c_idx].loc.r, game.cities[c_idx].loc.c, ptype, act, updated_indices.len()));
+
+                                        for idx in updated_indices {
+                                            match act {
+                                                UnitActivity::Explore => game.explore_piece(idx),
+                                                UnitActivity::Attack => game.attack_piece(idx),
+                                                UnitActivity::Random => game.random_piece(idx),
+                                                UnitActivity::Dest(_) => game.dest_piece(idx),
+                                                UnitActivity::Dir(_, _) => game.dir_piece(idx),
+                                                UnitActivity::Fill => game.process_fill_mode(idx),
+                                                UnitActivity::Upgrade => game.process_upgrade_mode(idx),
+                                                UnitActivity::Land => game.process_land_mode(idx),
+                                                _ => {}
+                                            }
+                                        }
+                                        game.pieces.retain(|p| p.hits > 0);
+                                    }
+                                } else {
+                                    game.log(String::from("Order update cancelled."));
+                                }
+                            } else {
+                                game.log(String::from("Order update cancelled."));
+                            }
+                        } else {
+                            game.log(String::from("Order update cancelled."));
+                        }
+                    }
+                    KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
+                    KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
+                    KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
+                    KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
+                    KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
+                    KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                    KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
+                    KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// The main input/turn loop.
 fn play(mut game: Game, autosave_interval: i32) -> io::Result<()> {
     let mut last_autosaved_turn = 0;
@@ -267,506 +772,10 @@ fn play(mut game: Game, autosave_interval: i32) -> io::Result<()> {
         }
 
         if game.mode == GameMode::Edit {
-            let edit_prompt = "[Arrows/NumPad] Move | [P]rod | [O]rders | [W]ake | e[X]ject | [I]nitial Orders | [E]xit Edit: ";
-            disp::refresh_display_with_input(&game, edit_prompt);
-
-            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                if let Ok(ev) = event::read() {
-                    if let Event::Mouse(mouse) = ev {
-                        match mouse.kind {
-                            crossterm::event::MouseEventKind::ScrollUp => game.msg_scroll = game.msg_scroll.saturating_add(1),
-                            crossterm::event::MouseEventKind::ScrollDown => game.msg_scroll = game.msg_scroll.saturating_sub(1),
-                            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                                game.last_mouse_coord = Some((mouse.column, mouse.row));
-                            }
-                            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-                                game.last_mouse_coord = None;
-                            }
-                            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                                let mut current = game.viewport_center.unwrap_or(game.edit_cursor);
-                                if let Some((last_c, last_r)) = game.last_mouse_coord {
-                                    let dc = mouse.column as i32 - last_c as i32;
-                                    let dr = mouse.row as i32 - last_r as i32;
-                                    current.c = (current.c as i32 - dc).clamp(0, game.cols as i32 - 1) as usize;
-                                    current.r = (current.r as i32 - dr).clamp(0, game.rows as i32 - 1) as usize;
-                                    game.viewport_center = Some(current);
-                                }
-                                game.last_mouse_coord = Some((mouse.column, mouse.row));
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    if let Event::Key(key) = ev {
-                        game.viewport_center = None;
-                        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                            if prompt_quit_confirmation(&game) {
-                                return Ok(());
-                            } else {
-                                game.log(String::from("Quit cancelled."));
-                                continue;
-                            }
-                        }
-
-                        match key.code {
-                            KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Esc => {
-                                game.mode = GameMode::Manual;
-                                game.log(String::from("Exited Edit Mode."));
-                                while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-                                    let _ = event::read();
-                                }
-                            }
-                            KeyCode::Char('p') | KeyCode::Char('P') => {
-                                if let Some(c_idx) = game.cities.iter().position(|c| c.loc == game.edit_cursor && c.owner == Owner::Player) {
-                                    prompt_city_production(&mut game, c_idx);
-                                } else {
-                                    game.log(String::from("No player-owned city at cursor location."));
-                                }
-                            }
-                            KeyCode::Char('w') | KeyCode::Char('W') => {
-                                let prompt = "Wake units at cursor: [A]rmy,[T]rns,[P]tBoat,[D]est,[S]ub,[C]arr,[B]ttle,[F]ght,[Z]Sat or [*]All: ";
-                                disp::refresh_display_with_input(&game, prompt);
-                                
-                                let mut target_ptype = None;
-                                let mut wake_all = false;
-                                
-                                loop {
-                                    if let Ok(Event::Key(k)) = event::read() {
-                                        if k.code == KeyCode::Esc { break; }
-                                        if let KeyCode::Char(c) = k.code {
-                                            if c == '*' { wake_all = true; break; }
-                                            target_ptype = match c.to_ascii_lowercase() {
-                                                'a' => Some(PieceType::Army),
-                                                't' => Some(PieceType::Transport),
-                                                'p' => Some(PieceType::PatrolBoat),
-                                                'd' => Some(PieceType::Destroyer),
-                                                's' => Some(PieceType::Submarine),
-                                                'c' => Some(PieceType::Carrier),
-                                                'b' => Some(PieceType::Battleship),
-                                                'f' => Some(PieceType::Fighter),
-                                                'z' | 'l' => Some(PieceType::Satellite),
-                                                _ => None,
-                                            };
-                                            if target_ptype.is_some() { break; }
-                                        }
-                                    }
-                                }
-
-                                if wake_all || target_ptype.is_some() {
-                                    let mut woke = 0;
-                                    let mut cargo_carriers = Vec::new();
-                                    for (i, p) in game.pieces.iter_mut().enumerate() {
-                                        if p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0 {
-                                            if wake_all || Some(p.ptype) == target_ptype {
-                                                if p.activity != UnitActivity::Idle {
-                                                    p.activity = UnitActivity::Idle;
-                                                    woke += 1;
-                                                }
-                                                if !p.cargo.is_empty() {
-                                                    cargo_carriers.push(i);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    for i in cargo_carriers {
-                                        game.wake_cargo(i);
-                                    }
-                                    if woke > 0 {
-                                        game.log(format!("Awakened {} unit(s) at cursor.", woke));
-                                    } else {
-                                        game.log(String::from("No resting player units of that type at cursor."));
-                                    }
-                                } else {
-                                    game.log(String::from("Wake cancelled."));
-                                }
-                            }
-                            KeyCode::Char('x') | KeyCode::Char('X') => {
-                                let mut cargo_carriers = Vec::new();
-                                for (i, p) in game.pieces.iter().enumerate() {
-                                    if p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0 && !p.cargo.is_empty() {
-                                        cargo_carriers.push(i);
-                                    }
-                                }
-                                if cargo_carriers.is_empty() {
-                                    game.log(String::from("No transports/carriers with cargo at cursor."));
-                                } else {
-                                    for i in cargo_carriers {
-                                        game.wake_cargo(i);
-                                    }
-                                }
-                            }
-                            KeyCode::Char('o') | KeyCode::Char('O') => {
-                                if let Some(p_idx) = game.pieces.iter().position(|p| p.loc == game.edit_cursor && p.owner == Owner::Player && p.hits > 0) {
-                                    let ptype = game.pieces[p_idx].ptype;
-                                    
-                                    let mut opts = vec!["[S]entry", "[Y]attack", "[G]rope", "[D]est", "[R]nd", "[V]ctr", "[W]ake"];
-                                    if ptype == PieceType::Army { opts.push("[T]rnsWait"); }
-                                    if ptype == PieceType::Fighter { opts.push("[L]and"); }
-                                    if ptype == PieceType::Transport || ptype == PieceType::Carrier { opts.push("[F]ill"); }
-                                    if ptype.is_naval() { opts.push("[U]pgrade"); }
-                                    
-                                    let prompt = format!("Order {:?} - {}: ", ptype, opts.join(","));
-                                    disp::refresh_display_with_input(&game, &prompt);
-                                    let mut new_act = None;
-                                    loop {
-                                        if let Ok(Event::Key(k)) = event::read() {
-                                            if k.code == KeyCode::Esc { break; }
-                                            if let KeyCode::Char(c) = k.code {
-                                                let choice = c.to_ascii_lowercase();
-                                                
-                                                let valid = match choice {
-                                                    's' | 'y' | 'g' | 'd' | 'r' | 'v' | 'w' => true,
-                                                    't' => ptype == PieceType::Army,
-                                                    'l' => ptype == PieceType::Fighter,
-                                                    'f' => ptype == PieceType::Transport || ptype == PieceType::Carrier,
-                                                    'u' => ptype.is_naval(),
-                                                    _ => false,
-                                                };
-                                                if !valid { continue; }
-                                                if choice == 'v' {
-                                                    let dir_prompt = format!("Set march direction for {:?} [Arrows/NumPad] or [Esc] Cancel: ", ptype);
-                                                    disp::refresh_display_with_input(&game, &dir_prompt);
-                                                    let mut chosen_dir = None;
-                                                    loop {
-                                                        if let Ok(Event::Key(dk)) = event::read() {
-                                                            if dk.code == KeyCode::Esc { break; }
-                                                            match dk.code {
-                                                                KeyCode::Char('8') | KeyCode::Up => { chosen_dir = Some((-1, 0)); break; }
-                                                                KeyCode::Char('2') | KeyCode::Down => { chosen_dir = Some((1, 0)); break; }
-                                                                KeyCode::Char('4') | KeyCode::Left => { chosen_dir = Some((0, -1)); break; }
-                                                                KeyCode::Char('6') | KeyCode::Right => { chosen_dir = Some((0, 1)); break; }
-                                                                KeyCode::Char('7') => { chosen_dir = Some((-1, -1)); break; }
-                                                                KeyCode::Char('9') => { chosen_dir = Some((-1, 1)); break; }
-                                                                KeyCode::Char('1') => { chosen_dir = Some((1, -1)); break; }
-                                                                KeyCode::Char('3') => { chosen_dir = Some((1, 1)); break; }
-                                                                _ => {}
-                                                            }
-                                                        }
-                                                    }
-                                                    if let Some((dr, dc)) = chosen_dir {
-                                                        new_act = Some(UnitActivity::Dir(dr, dc));
-                                                        break;
-                                                    }
-                                                } else if choice == 'd' {
-                                                    let dest_prompt = format!("Pick destination for {:?} [Arrows/NumPad] Move | [Enter] Confirm | [Esc] Cancel: ", ptype);
-                                                    let mut chosen_dest = None;
-                                                    let original_cursor = game.edit_cursor;
-                                                    loop {
-                                                        disp::refresh_display_with_input(&game, &dest_prompt);
-                                                        if let Ok(Event::Key(dk)) = event::read() {
-                                                            if dk.code == KeyCode::Esc {
-                                                                game.edit_cursor = original_cursor;
-                                                                break;
-                                                            } else if dk.code == KeyCode::Enter {
-                                                                chosen_dest = Some(game.edit_cursor);
-                                                                game.edit_cursor = original_cursor;
-                                                                break;
-                                                            } else {
-                                                                match dk.code {
-                                                                    KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
-                                                                    KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
-                                                                    KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
-                                                                    KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
-                                                                    KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                                    KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                                                                    KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                                    KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                                                                    _ => {}
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    if let Some(dest) = chosen_dest {
-                                                        new_act = Some(UnitActivity::Dest(dest));
-                                                        break;
-                                                    }
-                                                } else {
-                                                    new_act = match choice {
-                                                        's' => Some(UnitActivity::Sentry),
-                                                        'y' => Some(UnitActivity::Attack),
-                                                        'g' => Some(UnitActivity::Explore),
-                                                        'w' => Some(UnitActivity::Idle),
-                                                        'f' => Some(UnitActivity::Fill),
-                                                        'l' => Some(UnitActivity::Land),
-                                                        'r' => Some(UnitActivity::Random),
-                                                        't' => Some(UnitActivity::TransportWait),
-                                                        'u' => Some(UnitActivity::Upgrade),
-                                                        _ => None,
-                                                    };
-                                                    if new_act.is_some() { break; }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if let Some(act) = new_act {
-                                        game.pieces[p_idx].activity = act;
-                                        game.log(format!("Order applied manually to {:?} at cursor.", ptype));
-                                    } else {
-                                        game.log(String::from("Order update cancelled."));
-                                    }
-                                } else {
-                                    game.log(String::from("No player unit at cursor location."));
-                                }
-                            }
-                            KeyCode::Char('i') | KeyCode::Char('I') => {
-                                let mut edit_global = false;
-                                let mut edit_c_idx = None;
-
-                                if let Some(c_idx) = game.cities.iter().position(|c| c.loc == game.edit_cursor && c.owner == Owner::Player) {
-                                    let prompt = "Edit [L]ocal City Order or [G]lobal Fallback? (Esc to cancel): ";
-                                    disp::refresh_display_with_input(&game, prompt);
-                                    loop {
-                                        if let Ok(Event::Key(k)) = event::read() {
-                                            if k.code == KeyCode::Esc { break; }
-                                            if let KeyCode::Char(c) = k.code {
-                                                match c.to_ascii_lowercase() {
-                                                    'l' => { edit_c_idx = Some(c_idx); break; }
-                                                    'g' => { edit_global = true; break; }
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    let prompt = "No city here. Edit [G]lobal Fallback? (Y/N): ";
-                                    disp::refresh_display_with_input(&game, prompt);
-                                    loop {
-                                        if let Ok(Event::Key(k)) = event::read() {
-                                            if k.code == KeyCode::Esc { break; }
-                                            if let KeyCode::Char(c) = k.code {
-                                                match c.to_ascii_lowercase() {
-                                                    'y' | 'g' => { edit_global = true; break; }
-                                                    'n' => { break; }
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if edit_global || edit_c_idx.is_some() {
-                                    let mode_str = if edit_global { "GLOBAL" } else { "LOCAL" };
-                                    let prompt = format!("{} Order? [A]rmy,[T]rns,[P]tBoat,[D]est,[S]ub,[C]arr,[B]ttle,[F]ght,[Z]Sat: ", mode_str);
-                                    disp::refresh_display_with_input(&game, &prompt);
-                                    
-                                    let mut selected_ptype = None;
-                                    loop {
-                                        if let Ok(Event::Key(k)) = event::read() {
-                                            if k.code == KeyCode::Esc { break; }
-                                            if let KeyCode::Char(c) = k.code {
-                                                selected_ptype = match c.to_ascii_lowercase() {
-                                                    'a' => Some(PieceType::Army),
-                                                    't' => Some(PieceType::Transport),
-                                                    'p' => Some(PieceType::PatrolBoat),
-                                                    'd' => Some(PieceType::Destroyer),
-                                                    's' => Some(PieceType::Submarine),
-                                                    'c' => Some(PieceType::Carrier),
-                                                    'b' => Some(PieceType::Battleship),
-                                                    'f' => Some(PieceType::Fighter),
-                                                    'z' | 'l' => Some(PieceType::Satellite),
-                                                    _ => None,
-                                                };
-                                                if selected_ptype.is_some() { break; }
-                                            }
-                                        }
-                                    }
-
-                                    if let Some(ptype) = selected_ptype {
-                                        let mut opts = vec!["[S]entry", "[Y]attack", "[G]rope", "[D]est", "[R]nd", "[V]ctr", "[W]ake"];
-                                        if ptype == PieceType::Army { opts.push("[T]rnsWait"); }
-                                        if ptype == PieceType::Fighter { opts.push("[L]and"); }
-                                        if ptype == PieceType::Transport || ptype == PieceType::Carrier { opts.push("[F]ill"); }
-                                        if ptype.is_naval() { opts.push("[U]pgrade"); }
-                                        
-                                        let prompt2 = format!("{} Order for {:?} - {}: ", mode_str, ptype, opts.join(","));
-                                        disp::refresh_display_with_input(&game, &prompt2);
-                                        let mut new_act = None;
-                                        loop {
-                                            if let Ok(Event::Key(k)) = event::read() {
-                                                if k.code == KeyCode::Esc { break; }
-                                                if let KeyCode::Char(c) = k.code {
-                                                    let choice = c.to_ascii_lowercase();
-                                                    
-                                                    let valid = match choice {
-                                                        's' | 'y' | 'g' | 'd' | 'r' | 'v' | 'w' => true,
-                                                        't' => ptype == PieceType::Army,
-                                                        'l' => ptype == PieceType::Fighter,
-                                                        'f' => ptype == PieceType::Transport || ptype == PieceType::Carrier,
-                                                        'u' => ptype.is_naval(),
-                                                        _ => false,
-                                                    };
-                                                    if !valid { continue; }
-                                                    if choice == 'v' {
-                                                        let dir_prompt = format!("Set march direction for {:?} [Arrows/NumPad] or [Esc] Cancel: ", ptype);
-                                                        disp::refresh_display_with_input(&game, &dir_prompt);
-                                                        let mut chosen_dir = None;
-                                                        loop {
-                                                            if let Ok(Event::Key(dk)) = event::read() {
-                                                                if dk.code == KeyCode::Esc { break; }
-                                                                match dk.code {
-                                                                    KeyCode::Char('8') | KeyCode::Up => { chosen_dir = Some((-1, 0)); break; }
-                                                                    KeyCode::Char('2') | KeyCode::Down => { chosen_dir = Some((1, 0)); break; }
-                                                                    KeyCode::Char('4') | KeyCode::Left => { chosen_dir = Some((0, -1)); break; }
-                                                                    KeyCode::Char('6') | KeyCode::Right => { chosen_dir = Some((0, 1)); break; }
-                                                                    KeyCode::Char('7') => { chosen_dir = Some((-1, -1)); break; }
-                                                                    KeyCode::Char('9') => { chosen_dir = Some((-1, 1)); break; }
-                                                                    KeyCode::Char('1') => { chosen_dir = Some((1, -1)); break; }
-                                                                    KeyCode::Char('3') => { chosen_dir = Some((1, 1)); break; }
-                                                                    _ => {}
-                                                                }
-                                                            }
-                                                        }
-                                                        if let Some((dr, dc)) = chosen_dir {
-                                                            new_act = Some(UnitActivity::Dir(dr, dc));
-                                                            break;
-                                                        }
-                                                    } else if choice == 'd' {
-                                                        let dest_prompt = format!("Pick destination for {:?} [Arrows/NumPad] Move | [Enter] Confirm | [Esc] Cancel: ", ptype);
-                                                        let mut chosen_dest = None;
-                                                        let original_cursor = game.edit_cursor;
-                                                        loop {
-                                                            disp::refresh_display_with_input(&game, &dest_prompt);
-                                                            if let Ok(Event::Key(dk)) = event::read() {
-                                                                if dk.code == KeyCode::Esc {
-                                                                    game.edit_cursor = original_cursor;
-                                                                    break;
-                                                                } else if dk.code == KeyCode::Enter {
-                                                                    chosen_dest = Some(game.edit_cursor);
-                                                                    game.edit_cursor = original_cursor;
-                                                                    break;
-                                                                } else {
-                                                                    match dk.code {
-                                                                        KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
-                                                                        KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
-                                                                        KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
-                                                                        KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
-                                                                        KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                                        KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                                                                        KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                                                                        KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                                                                        _ => {}
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        if let Some(dest) = chosen_dest {
-                                                            new_act = Some(UnitActivity::Dest(dest));
-                                                            break;
-                                                        }
-                                                    } else {
-                                                        new_act = match choice {
-                                                            's' => Some(UnitActivity::Sentry),
-                                                            'y' => Some(UnitActivity::Attack),
-                                                            'g' => Some(UnitActivity::Explore),
-                                                            'w' => Some(UnitActivity::Idle),
-                                                            'f' => Some(UnitActivity::Fill),
-                                                            'l' => Some(UnitActivity::Land),
-                                                            'r' => Some(UnitActivity::Random),
-                                                            't' => Some(UnitActivity::TransportWait),
-                                                            'u' => Some(UnitActivity::Upgrade),
-                                                            _ => None,
-                                                        };
-                                                        if new_act.is_some() { break; }
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        if let Some(act) = new_act {
-                                            if edit_global {
-                                                if let Some(idx) = game.default_orders.iter().position(|(p, _)| *p == ptype) {
-                                                    game.default_orders[idx].1 = act;
-                                                } else {
-                                                    game.default_orders.push((ptype, act));
-                                                }
-                                                
-                                                let mut updated_indices = Vec::new();
-                                                for city in &game.cities {
-                                                    if city.owner == Owner::Player {
-                                                        if !city.default_orders.iter().any(|(p, _)| *p == ptype) {
-                                                            let c_loc = city.loc;
-                                                            for (i, p) in game.pieces.iter_mut().enumerate() {
-                                                                let is_awaiting = matches!(p.activity, UnitActivity::Idle | UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dir(_, _) | UnitActivity::Dest(_));
-                                                                if p.loc == c_loc && p.owner == Owner::Player && p.ptype == ptype && p.hits > 0 && is_awaiting {
-                                                                    p.activity = act;
-                                                                    updated_indices.push(i);
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                game.log(format!("GLOBAL default order for {:?} set to {:?} (Applied to {} units).", ptype, act, updated_indices.len()));
-                                                
-                                                for idx in updated_indices {
-                                                    match act {
-                                                        UnitActivity::Explore => game.explore_piece(idx),
-                                                        UnitActivity::Attack => game.attack_piece(idx),
-                                                        UnitActivity::Random => game.random_piece(idx),
-                                                        UnitActivity::Dest(_) => game.dest_piece(idx),
-                                                        UnitActivity::Dir(_, _) => game.dir_piece(idx),
-                                                        UnitActivity::Fill => game.process_fill_mode(idx),
-                                                        UnitActivity::Upgrade => game.process_upgrade_mode(idx),
-                                                        UnitActivity::Land => game.process_land_mode(idx),
-                                                        _ => {}
-                                                    }
-                                                }
-                                                game.pieces.retain(|p| p.hits > 0);
-                                            } else if let Some(c_idx) = edit_c_idx {
-                                                if let Some(idx) = game.cities[c_idx].default_orders.iter().position(|(p, _)| *p == ptype) {
-                                                    game.cities[c_idx].default_orders[idx].1 = act;
-                                                } else {
-                                                    game.cities[c_idx].default_orders.push((ptype, act));
-                                                }
-                                                let mut updated_indices = Vec::new();
-                                                let city_loc = game.cities[c_idx].loc;
-                                                for (i, p) in game.pieces.iter_mut().enumerate() {
-                                                    let is_awaiting = matches!(p.activity, UnitActivity::Idle | UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dir(_, _) | UnitActivity::Dest(_));
-                                                    if p.loc == city_loc && p.owner == Owner::Player && p.ptype == ptype && p.hits > 0 && is_awaiting {
-                                                        p.activity = act;
-                                                        updated_indices.push(i);
-                                                    }
-                                                }
-                                                game.log(format!("LOCAL City({},{}) order for {:?} set to {:?} (Applied to {} stacked units).", game.cities[c_idx].loc.r, game.cities[c_idx].loc.c, ptype, act, updated_indices.len()));
-                                                
-                                                for idx in updated_indices {
-                                                    match act {
-                                                        UnitActivity::Explore => game.explore_piece(idx),
-                                                        UnitActivity::Attack => game.attack_piece(idx),
-                                                        UnitActivity::Random => game.random_piece(idx),
-                                                        UnitActivity::Dest(_) => game.dest_piece(idx),
-                                                        UnitActivity::Dir(_, _) => game.dir_piece(idx),
-                                                        UnitActivity::Fill => game.process_fill_mode(idx),
-                                                        UnitActivity::Upgrade => game.process_upgrade_mode(idx),
-                                                        UnitActivity::Land => game.process_land_mode(idx),
-                                                        _ => {}
-                                                    }
-                                                }
-                                                game.pieces.retain(|p| p.hits > 0);
-                                            }
-                                        } else {
-                                            game.log(String::from("Order update cancelled."));
-                                        }
-                                    } else {
-                                        game.log(String::from("Order update cancelled."));
-                                    }
-                                } else {
-                                    game.log(String::from("Order update cancelled."));
-                                }
-                            }
-                            KeyCode::Char('8') | KeyCode::Up => game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1),
-                            KeyCode::Char('2') | KeyCode::Down => game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1),
-                            KeyCode::Char('4') | KeyCode::Left => game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1),
-                            KeyCode::Char('6') | KeyCode::Right => game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1),
-                            KeyCode::Char('7') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                            KeyCode::Char('9') => { game.edit_cursor.r = game.edit_cursor.r.saturating_sub(1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                            KeyCode::Char('1') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_sub(1); }
-                            KeyCode::Char('3') => { game.edit_cursor.r = game.edit_cursor.r.saturating_add(1).min(game.rows - 1); game.edit_cursor.c = game.edit_cursor.c.saturating_add(1).min(game.cols - 1); }
-                            _ => {}
-                        }
-                    }
-                }
+            if edit_mode_step(&mut game)? {
+                return Ok(());
             }
-            continue; 
+            continue;
         }
 
         let mut cleanup_needed = false;
