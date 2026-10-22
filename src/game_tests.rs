@@ -480,7 +480,7 @@ mod tests {
         game.pieces.push(test_piece(2, PieceType::Fighter, Owner::Comp, 5, 4));
         for _ in 0..20 {
             for p in game.pieces.iter_mut() { p.moves_left = p.ptype.max_moves(); p.fuel = 32; }
-            game.process_comp_ai();
+            game.comp_move();
         }
         assert!(game.pieces.iter().all(|p| p.hits > 0), "computer units were thrown away on the city");
     }
@@ -591,29 +591,28 @@ mod tests {
     }
 
     #[test]
-    fn test_logistics_auto_unload_on_coast() {
-        let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![Terrain::Sea; 10]; 10]; 
-        game.map[5][6] = Terrain::Land; 
-
-        let transport = Piece {
-            id: 1, ptype: PieceType::Transport, owner: Owner::Comp,
-            loc: Loc { r: 5, c: 5 }, hits: 1, moves_left: 2, activity: UnitActivity::Idle,
-            cargo: vec![Piece { 
-                id: 2, ptype: PieceType::Army, owner: Owner::Comp, 
-                loc: Loc { r: 0, c: 0 }, hits: 1, moves_left: 0, activity: UnitActivity::Sentry, 
-                cargo: Vec::new(), fuel: 0 
-            }],
-            fuel: 0,
-        };
+    fn test_full_computer_transport_lands_its_armies_at_a_city() {
+        // A full transport next to a coast with a neutral city: the armies come up from
+        // the hold and go for the city.
+        let mut game = Game::with_seed(12, 12, 50, 5);
+        game.map = vec![vec![Terrain::Sea; 12]; 12];
+        for r in 1..11 { game.map[r][8] = Terrain::Land; game.map[r][9] = Terrain::Land; }
+        game.cities.push(City {
+            loc: Loc { r: 5, c: 8 }, owner: Owner::Neutral, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
+        });
+        let mut transport = test_piece(1, PieceType::Transport, Owner::Comp, 5, 6);
+        for i in 0..6 {
+            transport.cargo.push(test_piece(10 + i, PieceType::Army, Owner::Comp, 5, 6));
+        }
         game.pieces.push(transport);
-
-        game.check_adjacent_unloads();
-
-        assert_eq!(game.pieces[0].cargo.len(), 0, "Transport should automatically empty its cargo when adjacent to land");
-        assert_eq!(game.pieces.len(), 2, "Cargo should be moved to the active pieces array");
-        assert_eq!(game.pieces[1].loc, Loc { r: 5, c: 5 }, "Unloaded army should spawn on the transport's tile");
-        assert_eq!(game.pieces[1].activity, UnitActivity::Idle, "Unloaded army should be woken up");
+        for _ in 0..3 {
+            game.comp_move();
+            for p in game.pieces.iter_mut() { p.moves_left = p.ptype.max_moves(); }
+        }
+        let aboard = game.pieces.iter().find(|p| p.ptype == PieceType::Transport).map_or(0, |t| {
+            t.cargo.len() + game.pieces.iter().filter(|a| a.ptype == PieceType::Army && a.hits > 0 && a.loc == t.loc).count()
+        });
+        assert!(aboard < 6 || game.cities[0].owner == Owner::Comp, "the armies should have gone ashore");
     }
 
     #[test]
@@ -779,31 +778,21 @@ mod tests {
     }
 
     #[test]
-    fn test_ai_flow_field_pathfinding() {
+    fn test_computer_army_heads_for_a_known_enemy_city() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![Terrain::Land; 10]; 10]; // All land
-
-        // Player City at (1,1)
+        game.map = vec![vec![Terrain::Land; 10]; 10];
         game.cities.push(City {
             loc: Loc { r: 1, c: 1 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
         });
+        game.pieces.push(test_piece(1, PieceType::Army, Owner::Comp, 8, 8));
+        // The computer has seen the whole map (it only acts on what it has seen).
+        for r in 0..10 { for c in 0..10 { game.comp_map[r][c] = b'+'; } }
+        game.comp_map[1][1] = b'O';
 
-        // Comp Army at (8,8)
-        game.pieces.push(Piece {
-            id: 1, ptype: PieceType::Army, owner: Owner::Comp,
-            loc: Loc { r: 8, c: 8 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle,
-            cargo: Vec::new(), fuel: 0,
-        });
-
-        game.process_comp_ai();
-
-        let new_loc = game.pieces[0].loc;
-        assert_ne!(new_loc, Loc { r: 8, c: 8 }, "Comp Army should have moved");
-        
-        let old_dist = (8isize - 1).pow(2) + (8isize - 1).pow(2);
-        let new_dist = (new_loc.r as isize - 1).pow(2) + (new_loc.c as isize - 1).pow(2);
-        
-        assert!(new_dist < old_dist, "Comp Army should move strictly closer to the Player target via gradient descent");
+        let before = game.dist(game.pieces[0].loc, Loc { r: 1, c: 1 });
+        game.comp_move();
+        let after = game.dist(game.pieces[0].loc, Loc { r: 1, c: 1 });
+        assert_eq!(after, before - 1, "the army should step toward the city");
     }
 
     #[test]
@@ -2339,5 +2328,157 @@ mod tests {
         }
         assert_eq!(game.cities[0].prod, PieceType::Army);
         assert_eq!(game.cities[0].work, -1);
+    }
+
+    // ---- the computer player (ai.rs) ----
+
+    /// Lets the computer see the whole map, as if it had explored everything.
+    fn comp_knows_all(game: &mut Game) {
+        let (r, c) = (game.rows / 2, game.cols / 2);
+        game.comp_scan(Loc { r, c }, (game.rows.max(game.cols)) as i32);
+    }
+
+    #[test]
+    fn test_computer_only_sees_what_its_units_see() {
+        let mut game = Game::with_seed(20, 20, 50, 1);
+        game.map = vec![vec![Terrain::Land; 20]; 20];
+        game.pieces.push(test_piece(1, PieceType::Army, Owner::Comp, 5, 5));
+        game.pieces.push(test_piece(2, PieceType::Army, Owner::Player, 5, 15));
+        game.comp_scan_all();
+        assert!(matches!(game.comp_map[5][15], 0 | b' '), "too far to see");
+        assert_eq!(game.comp_map[5][6], b'+');
+        game.pieces[1].loc = Loc { r: 5, c: 7 }; // within an army's sight of 2
+        game.comp_scan_all();
+        assert_eq!(game.comp_map[5][7], b'A');
+    }
+
+    #[test]
+    fn test_computer_hides_nothing_but_detects_subs_only_up_close() {
+        let mut game = Game::with_seed(20, 20, 50, 1);
+        game.pieces.push(test_piece(1, PieceType::Battleship, Owner::Comp, 5, 5));
+        game.pieces.push(test_piece(2, PieceType::Submarine, Owner::Player, 5, 8));
+        game.comp_scan_all();
+        assert_eq!(game.comp_map[5][8], b'.', "a submarine 3 away goes unseen");
+        game.pieces[1].loc = Loc { r: 5, c: 6 };
+        game.comp_scan_all();
+        assert_eq!(game.comp_map[5][6], b'S');
+    }
+
+    /// Two islands: the computer's (two coastal cities) and one with a coastal neutral city.
+    fn two_islands() -> Game {
+        let mut game = Game::with_seed(20, 30, 50, 3);
+        for r in 4..9 { for c in 3..9 { game.map[r][c] = Terrain::Land; } }
+        for r in 4..9 { for c in 20..26 { game.map[r][c] = Terrain::Land; } }
+        game.cities.push(city(Loc { r: 4, c: 4 }, Owner::Comp));
+        game.cities.push(city(Loc { r: 8, c: 8 }, Owner::Comp));
+        game.cities.push(city(Loc { r: 4, c: 20 }, Owner::Neutral));
+        game
+    }
+
+    #[test]
+    fn test_computer_sets_up_a_transport_producer() {
+        let mut game = two_islands();
+        comp_knows_all(&mut game);
+        // The home island is fully known and has nothing left to take, so a newly won
+        // city there becomes the computer's transport producer.
+        game.comp_new_cities.push(1);
+        game.comp_move();
+        assert_eq!(game.cities[1].prod, PieceType::Transport);
+        // retooling (-6), then this turn's work (+1)
+        assert_eq!(game.cities[1].work, -(PieceType::Transport.build_cost() / 5) + 1);
+        assert!(game.comp_new_cities.is_empty());
+    }
+
+    #[test]
+    fn test_new_computer_city_next_to_an_enemy_city_builds_armies() {
+        let mut game = two_islands();
+        game.cities[0].owner = Owner::Player;
+        comp_knows_all(&mut game);
+        game.cities[1].prod = PieceType::Fighter;
+        game.comp_new_cities.push(1);
+        game.comp_move();
+        assert_eq!(game.cities[1].prod, PieceType::Army);
+    }
+
+    #[test]
+    fn test_army_with_nothing_to_do_boards_a_loading_transport() {
+        let mut game = two_islands();
+        game.pieces.push(test_piece(1, PieceType::Army, Owner::Comp, 6, 8));
+        game.pieces.push(test_piece(2, PieceType::Transport, Owner::Comp, 6, 9));
+        game.pieces[1].activity = UnitActivity::Fill; // loading
+        comp_knows_all(&mut game);
+        game.comp_move();
+        let t = game.pieces.iter().find(|p| p.ptype == PieceType::Transport).unwrap();
+        let aboard = t.cargo.len() + game.pieces.iter().filter(|a| a.ptype == PieceType::Army && a.loc == t.loc).count();
+        assert_eq!(aboard, 1, "the army should have gone aboard");
+    }
+
+    #[test]
+    fn test_computer_fighter_low_on_fuel_flies_home() {
+        let mut game = Game::with_seed(30, 30, 50, 1);
+        game.map[5][5] = Terrain::Land;
+        game.cities.push(city(Loc { r: 5, c: 5 }, Owner::Comp));
+        let mut f = test_piece(1, PieceType::Fighter, Owner::Comp, 5, 13);
+        f.fuel = 10; // 8 from home: time to turn back (fuel <= distance + 2)
+        game.pieces.push(f);
+        comp_knows_all(&mut game);
+        game.comp_move();
+        let f = game.pieces.iter().find(|p| p.ptype == PieceType::Fighter).expect("the fighter must not crash");
+        assert_eq!(f.loc, Loc { r: 5, c: 5 }, "it should have flown its 8 moves home... ");
+        assert_eq!(f.fuel, crate::game::FIGHTER_FUEL, "...and refuelled on landing");
+    }
+
+    #[test]
+    fn test_damaged_computer_ship_heads_for_port() {
+        let mut game = Game::with_seed(30, 30, 50, 1);
+        game.map[5][5] = Terrain::Land;
+        game.cities.push(city(Loc { r: 5, c: 5 }, Owner::Comp));
+        let mut d = test_piece(1, PieceType::Destroyer, Owner::Comp, 5, 12);
+        d.hits = 1;
+        game.pieces.push(d);
+        comp_knows_all(&mut game);
+        // One hit of three left: one move a turn.
+        for _ in 0..7 {
+            game.comp_move();
+        }
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 5 }, "it should be in port");
+    }
+
+    #[test]
+    fn test_computer_capture_is_queued_for_production() {
+        let mut game = Game::with_seed(10, 10, 50, 2);
+        game.map = vec![vec![Terrain::Land; 10]; 10];
+        game.cities.push(city(Loc { r: 5, c: 5 }, Owner::Neutral));
+        game.pieces.push(test_piece(1, PieceType::Army, Owner::Comp, 5, 6));
+        while game.cities[0].owner == Owner::Neutral {
+            game.pieces[0].hits = 1;
+            game.attempt_move(0, Loc { r: 5, c: 5 });
+        }
+        assert_eq!(game.comp_new_cities, vec![0]);
+    }
+
+    #[test]
+    fn test_old_saves_give_the_computer_a_full_view() {
+        let mut game = Game::with_seed(12, 12, 50, 1);
+        game.map[5][5] = Terrain::Land;
+        game.cities.push(city(Loc { r: 5, c: 5 }, Owner::Player));
+        let (path, mut v) = save_to_json(&game, "compview_v2.sav");
+        v["save_version"] = serde_json::json!(2);
+        write_json(&path, &v);
+        let loaded = Game::load_game(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.comp_map[5][5], b'O');
+        assert_eq!(loaded.comp_map[1][1], b'.');
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_computer_turns_are_reproducible_with_a_seed() {
+        let play = || {
+            let mut g = Game::with_seed(40, 60, 50, 11);
+            g.setup_initial_states();
+            for _ in 0..60 { g.process_turn(); }
+            (g.pieces.iter().map(|p| (p.id, p.loc)).collect::<Vec<_>>(), g.cities.iter().map(|c| c.owner).collect::<Vec<_>>())
+        };
+        assert_eq!(play(), play());
     }
 }

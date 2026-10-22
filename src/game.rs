@@ -17,7 +17,7 @@ fn wrap_axis(v: i64, len: usize) -> i64 {
 
 /// `loc` moved by (`dr`, `dc`), or `None` if that is off the map. On a torus map (`-t`),
 /// stepping into the border ring lands on the opposite playable edge instead.
-fn geo_offset(torus: bool, rows: usize, cols: usize, loc: Loc, dr: i32, dc: i32) -> Option<Loc> {
+pub(crate) fn geo_offset(torus: bool, rows: usize, cols: usize, loc: Loc, dr: i32, dc: i32) -> Option<Loc> {
     let (mut r, mut c) = (loc.r as i64 + dr as i64, loc.c as i64 + dc as i64);
     if torus && rows > 2 && cols > 2 {
         r = wrap_axis(r, rows);
@@ -32,7 +32,7 @@ fn geo_offset(torus: bool, rows: usize, cols: usize, loc: Loc, dr: i32, dc: i32)
 
 /// The original game's `dist()`: the larger of the row and column distances, each taking
 /// the shorter way round on a torus map.
-fn geo_dist(torus: bool, rows: usize, cols: usize, a: Loc, b: Loc) -> i32 {
+pub(crate) fn geo_dist(torus: bool, rows: usize, cols: usize, a: Loc, b: Loc) -> i32 {
     let mut dr = (a.r as i32 - b.r as i32).abs();
     let mut dc = (a.c as i32 - b.c as i32).abs();
     if torus {
@@ -65,7 +65,7 @@ fn fresh_rng() -> StdRng {
 /// Version of the save-file format written by this build. Bump it whenever a change to
 /// `Game` can't be handled by a `#[serde(default)]` on the new field, and add a
 /// migration step to `Game::migrate`. Saves from before versioning count as version 0.
-pub const SAVE_VERSION: u32 = 2;
+pub const SAVE_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Game {
@@ -78,6 +78,8 @@ pub struct Game {
     pub difficulty: u32,
     pub mode: GameMode,
     pub map: Vec<Vec<Terrain>>,
+    /// The computer's view of the world, as in the original: what its units and cities
+    /// have seen, as map characters (see `ai.rs`); 0 or `' '` is unexplored.
     pub comp_map: Vec<Vec<u8>>,
     pub player_map: Vec<Vec<u8>>,
     /// What the player last saw of enemy units on each square, as the unit's map letter
@@ -85,6 +87,10 @@ pub struct Game {
     /// map, it only changes when the square is in sight, so it can be out of date.
     #[serde(default)]
     pub player_view: Vec<Vec<u8>>,
+    /// Cities the computer has won since its last move, whose production it still has to
+    /// choose.
+    #[serde(default)]
+    pub comp_new_cities: Vec<usize>,
     /// Debug observer mode (`~`): the player sees everything, live.
     #[serde(skip)]
     pub omniscient: bool,
@@ -139,6 +145,7 @@ impl Game {
             player_map,
             player_view,
             omniscient: false,
+            comp_new_cities: Vec::new(),
             cities: Vec::new(),
             pieces: Vec::new(),
             messages: Vec::new(),
@@ -270,7 +277,7 @@ impl Game {
 
     /// First id that is safe to assign: above the stored counter and above every id
     /// currently in play, including pieces carried in cargo (which are not in `self.pieces`).
-    fn next_free_id(&self) -> usize {
+    pub(crate) fn next_free_id(&self) -> usize {
         fn max_id(pieces: &[Piece]) -> usize {
             pieces.iter().map(|p| p.id.max(max_id(&p.cargo))).max().unwrap_or(0)
         }
@@ -728,6 +735,9 @@ impl Game {
                 // A captured city starts from scratch, so even armies pay the retooling cost.
                 city.prod = PieceType::Army;
                 city.work = retool_work(PieceType::Army);
+                // The computer picks what the city really builds at the start of its next
+                // move (`comp_prod`), as the original does for a city with no production.
+                self.comp_new_cities.push(c_idx);
             }
 
             if is_player {
@@ -1255,285 +1265,72 @@ impl Game {
         }
     }
 
-    pub fn process_comp_ai(&mut self) {
-        use std::collections::VecDeque;
-
-        // 1. Initialize Dual Flow Fields
-        let mut attack_map = vec![vec![i32::MAX; self.cols]; self.rows];
-        let mut attack_queue = VecDeque::new();
-        
-        let mut ferry_map = vec![vec![i32::MAX; self.cols]; self.rows];
-        let mut ferry_queue = VecDeque::new();
-
-        // 2. Seed the Targets
-        for city in &self.cities {
-            if city.owner != Owner::Comp {
-                attack_map[city.loc.r][city.loc.c] = 0;
-                attack_queue.push_back((city.loc.r, city.loc.c, 0));
-            }
+    /// One turn of work on city `c_idx`'s production. True if a unit is ready, as in the
+    /// original's `work++ >= build_time`: the check uses the work done before this turn's
+    /// increment, and any surplus carries over to the next unit.
+    pub(crate) fn advance_production(&mut self, c_idx: usize) -> bool {
+        let city = &mut self.cities[c_idx];
+        let cost = city.prod.build_cost();
+        let ready = city.work >= cost;
+        city.work += 1;
+        if ready {
+            city.work -= cost;
         }
-        for p in &self.pieces {
-            if p.hits > 0 {
-                if p.owner == Owner::Player {
-                    attack_map[p.loc.r][p.loc.c] = 0;
-                    attack_queue.push_back((p.loc.r, p.loc.c, 0));
-                } else if p.owner == Owner::Comp && p.ptype == PieceType::Army {
-                    // Seed ferries to target Armies that are NOT already on a boat
-                    let on_transport = self.pieces.iter().any(|t| t.ptype == PieceType::Transport && t.loc == p.loc && t.id != p.id);
-                    if !on_transport {
-                        ferry_map[p.loc.r][p.loc.c] = 0;
-                        ferry_queue.push_back((p.loc.r, p.loc.c, 0));
-                    }
-                }
-            }
-        }
-
-        let dirs = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)];
-        
-        // 3. Flood Fill the Distances (The Wave)
-        while let Some((r, c, d)) = attack_queue.pop_front() {
-            for &(dr, dc) in &dirs {
-                if let Some(Loc { r: nr, c: nc }) = self.offset(Loc { r, c }, dr, dc) {
-                    if attack_map[nr][nc] > d + 1 {
-                        attack_map[nr][nc] = d + 1;
-                        attack_queue.push_back((nr, nc, d + 1));
-                    }
-                }
-            }
-        }
-
-        while let Some((r, c, d)) = ferry_queue.pop_front() {
-            for &(dr, dc) in &dirs {
-                if let Some(Loc { r: nr, c: nc }) = self.offset(Loc { r, c }, dr, dc) {
-                    if ferry_map[nr][nc] > d + 1 {
-                        ferry_map[nr][nc] = d + 1;
-                        ferry_queue.push_back((nr, nc, d + 1));
-                    }
-                }
-            }
-        }
-
-        // 4. Units Roll Downhill
-        let comp_indices: Vec<usize> = self.pieces.iter().enumerate()
-            .filter(|(_, p)| p.owner == Owner::Comp && p.hits > 0 && p.ptype != PieceType::Satellite)
-            .map(|(i, _)| i)
-            .collect();
-
-        for idx in comp_indices {
-            let mut visited = vec![self.pieces[idx].loc];
-
-            while self.pieces[idx].moves_left > 0 && self.pieces[idx].hits > 0 {
-                let p_loc = self.pieces[idx].loc;
-                let ptype = self.pieces[idx].ptype;
-
-                // Empty transports go home to ferry. Everyone else attacks.
-                let map_to_use = if ptype == PieceType::Transport && self.pieces[idx].cargo.is_empty() {
-                    &ferry_map
-                } else {
-                    &attack_map
-                };
-
-                let current_dist = map_to_use[p_loc.r][p_loc.c];
-                let mut min_found_dist = current_dist;
-                let mut best_steps = Vec::new();
-                let mut wiggle_steps = Vec::new();
-
-                for &dir in &dirs {
-                    if let Some(next_loc) = self.step(p_loc, dir) {
-                        if visited.contains(&next_loc) { continue; }
-
-                        let is_land = self.map[next_loc.r][next_loc.c] == Terrain::Land;
-                        let can_enter = match ptype {
-                            PieceType::Army => is_land || self.pieces.iter().any(|p| p.loc == next_loc && p.owner == Owner::Comp && p.ptype == PieceType::Transport && self.has_room_for(p, Some(self.pieces[idx].id))),
-                            PieceType::Fighter | PieceType::Satellite => true,
-                            _ => !is_land || self.cities.iter().any(|c| c.loc == next_loc),
-                        };
-
-                        if can_enter && !self.is_fatal_city_entry(ptype, Owner::Comp, next_loc) && !self.is_tile_blocked_by_friend(next_loc, ptype, Owner::Comp) {
-                            let mut d = map_to_use[next_loc.r][next_loc.c];
-                            let current_is_land = self.map[p_loc.r][p_loc.c] == Terrain::Land;
-                            
-                            // Force armies on land to board adjacent available transports
-                            if ptype == PieceType::Army && current_is_land && !is_land {
-                                d = -1;
-                            }
-
-                            if d < min_found_dist {
-                                min_found_dist = d;
-                                best_steps.clear();
-                                best_steps.push(next_loc);
-                            } else if d == min_found_dist && d < current_dist {
-                                best_steps.push(next_loc);
-                            } else if d == current_dist {
-                                wiggle_steps.push(next_loc);
-                            }
-                        }
-                    }
-                }
-
-                let chosen_step = if !best_steps.is_empty() {
-                    Some(best_steps[self.rng.gen_range(0..best_steps.len())])
-                } else if !wiggle_steps.is_empty() && self.rng.gen_bool(0.5) {
-                    Some(wiggle_steps[self.rng.gen_range(0..wiggle_steps.len())])
-                } else {
-                    None
-                };
-
-                if let Some(step) = chosen_step {
-                    visited.push(step);
-                    let old_loc = self.pieces[idx].loc;
-                    let moves_before = self.pieces[idx].moves_left;
-                    let _ = self.attempt_move(idx, step);
-                    if self.pieces[idx].hits == 0 { break; }
-                    if self.pieces[idx].loc == old_loc && self.pieces[idx].moves_left < moves_before {
-                        // Won a fight but another enemy still holds that tile: stay put and
-                        // let the next iteration take on the rest of the stack.
-                        visited.pop();
-                        continue;
-                    }
-                    if self.pieces[idx].loc == old_loc { 
-                        // Unit failed to move (bounced off a blocker or invalid state), consume moves to prevent infinite loops
-                        self.pieces[idx].moves_left = 0;
-                        break; 
-                    }
-                } else {
-                    self.pieces[idx].moves_left = 0;
-                    break;
-                }
-            }
-        }
+        ready
     }
 
-    pub fn check_adjacent_unloads(&mut self) {
-        let mut to_wake = Vec::new();
-        for (i, p) in self.pieces.iter().enumerate() {
-            // Only automatically wake cargo for Computer transports.
-            // Player transports hold cargo until the player manually wakes [W] them.
-            if p.ptype == PieceType::Transport && !p.cargo.is_empty() && p.hits > 0 && p.owner == Owner::Comp {
-                let mut should_unload = false;
-                for dr in -1..=1 {
-                    for dc in -1..=1 {
-                        if let Some(loc_rc) = self.offset(p.loc, dr, dc) {
-                            if self.map[loc_rc.r][loc_rc.c] == Terrain::Land {
-                                let near_enemy_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner != Owner::Comp);
-                                let near_friendly_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner == Owner::Comp);
-                                if near_enemy_city || !near_friendly_city {
-                                    should_unload = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                if should_unload {
-                    to_wake.push(i);
-                }
-            }
+    /// Builds city `c_idx`'s current production on its square and returns the new piece's
+    /// index. The player's new units take the city's (or the global) standing orders.
+    pub(crate) fn produce_unit(&mut self, c_idx: usize) -> usize {
+        let id = self.next_free_id();
+        self.next_id = id + 1;
+        let city = &self.cities[c_idx];
+        let ptype = city.prod;
+        let mut activity = if city.owner == Owner::Player {
+            city.default_orders.iter().find(|(p, _)| *p == ptype).map(|(_, a)| *a)
+                .unwrap_or_else(|| self.default_orders.iter().find(|(p, _)| *p == ptype).map(|(_, a)| *a).unwrap_or(UnitActivity::Idle))
+        } else {
+            UnitActivity::Idle
+        };
+        if ptype == PieceType::Satellite {
+            // A new satellite heads off on a random diagonal (the original's sat_dir).
+            activity = SAT_DIRS[self.rng.gen_range(0..SAT_DIRS.len())];
         }
-        for i in to_wake {
-            self.wake_cargo(i);
-        }
+        self.pieces.push(Piece {
+            id,
+            ptype,
+            owner: city.owner,
+            loc: city.loc,
+            hits: ptype.max_hits(),
+            moves_left: ptype.max_moves(),
+            activity,
+            cargo: Vec::new(),
+            fuel: match ptype {
+                PieceType::Fighter => FIGHTER_FUEL,
+                PieceType::Satellite => SATELLITE_LIFE,
+                _ => 0,
+            },
+        });
+        self.pieces.len() - 1
     }
 
     pub fn process_turn(&mut self) {
         self.turn += 1;
         self.log(format!("Advanced to Turn {}.", self.turn));
 
-        let mut new_pieces = Vec::new();
-        let mut logs_to_add = Vec::new();
-        
-        let comp_cities_count = self.cities.iter().filter(|c| c.owner == Owner::Comp).count();
-        let mut next_id = self.next_free_id();
-
-        let city_is_coastal: Vec<bool> = self.cities.iter().map(|c| self.is_coastal(c.loc)).collect();
-        for (idx, city) in self.cities.iter_mut().enumerate() {
-            if city.owner == Owner::Neutral {
+        // The player's cities produce now; the computer's produce at the start of its own
+        // move (`comp_move`), as in the original.
+        for idx in 0..self.cities.len() {
+            if self.cities[idx].owner != Owner::Player {
                 continue;
             }
-
-            // As in the original (`work++ >= build_time`): the check uses the work done
-            // before this turn's increment, and any surplus carries over to the next unit.
-            let cost = city.prod.build_cost();
-            let ready = city.work >= cost;
-            city.work += 1;
-
-            if ready {
-                city.work -= cost;
-                
-                if city.owner == Owner::Player {
-                    logs_to_add.push(format!(
-                        "City [C{}] ({},{}) finished building {:?}!",
-                        idx, city.loc.r, city.loc.c, city.prod
-                    ));
-                }
-
-                let new_id = next_id;
-                next_id += 1;
-                
-                let starting_activity = if city.owner == Owner::Player {
-                    city.default_orders.iter().find(|(p, _)| *p == city.prod).map(|(_, a)| *a)
-                        .unwrap_or_else(|| self.default_orders.iter().find(|(p, _)| *p == city.prod).map(|(_, a)| *a).unwrap_or(UnitActivity::Idle))
-                } else {
-                    UnitActivity::Explore
-                };
-
-                new_pieces.push(Piece {
-                    id: new_id,
-                    ptype: city.prod,
-                    owner: city.owner,
-                    loc: city.loc,
-                    hits: city.prod.max_hits(),
-                    moves_left: city.prod.max_moves(),
-                    activity: starting_activity,
-                    cargo: Vec::new(),
-                    fuel: match city.prod {
-                        PieceType::Fighter => FIGHTER_FUEL,
-                        PieceType::Satellite => SATELLITE_LIFE,
-                        _ => 0,
-                    },
-                });
-                if city.prod == PieceType::Satellite {
-                    // A new satellite heads off on a random diagonal (the original's sat_dir).
-                    let last = new_pieces.len() - 1;
-                    new_pieces[last].activity = SAT_DIRS[self.rng.gen_range(0..SAT_DIRS.len())];
-                }
-
-                if city.owner == Owner::Comp {
-                    let old_prod = city.prod;
-                    let is_coastal = city_is_coastal[idx];
-                    if is_coastal {
-                        let roll = self.rng.gen_range(0..100);
-                        if comp_cities_count < 8 {
-                            // Early game: Flood the island with Armies and Transports
-                            city.prod = if roll < 60 { PieceType::Army }
-                                        else if roll < 80 { PieceType::Transport }
-                                        else if roll < 90 { PieceType::Fighter }
-                                        else { PieceType::PatrolBoat };
-                        } else {
-                            // Mid/Late game: Standard naval escalation
-                            city.prod = if roll < 20 { PieceType::Army }
-                                        else if roll < 30 { PieceType::Fighter }
-                                        else if roll < 45 { PieceType::Transport }
-                                        else if roll < 55 { PieceType::PatrolBoat }
-                                        else if roll < 70 { PieceType::Destroyer }
-                                        else if roll < 80 { PieceType::Submarine }
-                                        else if roll < 90 { PieceType::Carrier }
-                                        else { PieceType::Battleship };
-                        }
-                    } else {
-                        city.prod = if self.rng.gen_bool(0.8) { PieceType::Army } else { PieceType::Fighter };
-                    }
-                    if city.prod != old_prod {
-                        city.work = retool_work(city.prod);
-                    }
-                }
+            if self.advance_production(idx) {
+                let city = &self.cities[idx];
+                let msg = format!("City [C{}] ({},{}) finished building {:?}!", idx, city.loc.r, city.loc.c, city.prod);
+                self.log(msg);
+                self.produce_unit(idx);
             }
         }
-
-        for msg in logs_to_add {
-            self.log(msg);
-        }
-        self.next_id = next_id;
-        self.pieces.extend(new_pieces);
 
         let mut auto_explore_indices = Vec::new();
         let mut auto_attack_indices = Vec::new();
@@ -1652,8 +1449,7 @@ impl Game {
             self.process_land_mode(idx);
         }
 
-        self.process_comp_ai();
-        self.check_adjacent_unloads();
+        self.comp_move();
 
         let mut dead_sats = Vec::new();
         for p in self.pieces.iter_mut() {
@@ -2492,6 +2288,24 @@ impl Game {
                 }
             }
             self.refresh_player_view();
+        }
+        let grids_ok = self.comp_map.len() == self.rows && self.comp_map.iter().all(|r| r.len() == self.cols)
+            && self.map.len() == self.rows && self.map.iter().all(|r| r.len() == self.cols);
+        if self.save_version < 3 && grids_ok {
+            // Version 3 gave the computer its own view of the world (`comp_map`). Older
+            // computers saw everything, so start it off knowing the map and every city.
+            for r in 0..self.rows {
+                for c in 0..self.cols {
+                    self.comp_map[r][c] = if self.map[r][c] == Terrain::Land { b'+' } else { b'.' };
+                }
+            }
+            for city in &self.cities {
+                self.comp_map[city.loc.r][city.loc.c] = match city.owner {
+                    Owner::Neutral => b'*',
+                    Owner::Player => b'O',
+                    Owner::Comp => b'X',
+                };
+            }
         }
         self.save_version = SAVE_VERSION;
     }
