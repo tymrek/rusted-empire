@@ -7,8 +7,16 @@ fn fresh_rng() -> StdRng {
     StdRng::from_entropy()
 }
 
+/// Version of the save-file format written by this build. Bump it whenever a change to
+/// `Game` can't be handled by a `#[serde(default)]` on the new field, and add a
+/// migration step to `Game::migrate`. Saves from before versioning count as version 0.
+pub const SAVE_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Game {
+    /// Save-file format version (see `SAVE_VERSION`).
+    #[serde(default)]
+    pub save_version: u32,
     pub rows: usize,
     pub cols: usize,
     pub turn: i32,
@@ -20,13 +28,17 @@ pub struct Game {
     pub cities: Vec<City>,
     pub pieces: Vec<Piece>,
     pub messages: Vec<String>,
+    #[serde(skip)]
     pub msg_scroll: usize,          
     pub pending_cities: Vec<usize>, 
     pub player_score: u32,
     pub comp_score: u32,
+    #[serde(skip)]
     pub edit_cursor: Loc,
     pub default_orders: Vec<(PieceType, UnitActivity)>,
+    #[serde(skip)]
     pub viewport_center: Option<Loc>,
+    #[serde(skip)]
     pub last_mouse_coord: Option<(u16, u16)>,
     /// Next piece id to hand out. Ids are never reused, even after a piece dies
     /// or while it is riding in a transport's cargo hold.
@@ -49,6 +61,7 @@ impl Game {
         let comp_map = vec![vec![0; cols]; rows];
         let player_map = vec![vec![0; cols]; rows];
         Self {
+            save_version: SAVE_VERSION,
             rows,
             cols,
             turn: 1,
@@ -2040,12 +2053,53 @@ impl Game {
         result
     }
 
-    pub fn load_game(filename: &str) -> Option<Self> {
-        if let Ok(data) = std::fs::read_to_string(filename) {
-            serde_json::from_str(&data).ok()
-        } else {
-            None
+    /// Loads a save, or says why it can't: unreadable, not a save, from a newer build, or
+    /// internally inconsistent. View-only state (viewport, mouse drag, edit cursor, message
+    /// scroll) is never stored in saves, and a game that was saved mid-edit, mid-automove
+    /// or mid-destination-pick comes back in plain manual mode.
+    pub fn load_game(filename: &str) -> Result<Self, String> {
+        let data = std::fs::read_to_string(filename)
+            .map_err(|e| format!("could not read {}: {}", filename, e))?;
+        let mut game: Game = serde_json::from_str(&data)
+            .map_err(|e| format!("{} is not a valid save file ({})", filename, e))?;
+        if game.save_version > SAVE_VERSION {
+            return Err(format!(
+                "{} was saved by a newer version of the game (save format {}, this build understands up to {})",
+                filename, game.save_version, SAVE_VERSION
+            ));
         }
+        game.migrate();
+        game.validate().map_err(|e| format!("{} is damaged: {}", filename, e))?;
+        game.mode = GameMode::Manual;
+        Ok(game)
+    }
+
+    /// Brings a save from an older format up to `SAVE_VERSION`. Version 0 (saves written
+    /// before versioning) needs nothing beyond the field defaults.
+    fn migrate(&mut self) {
+        self.save_version = SAVE_VERSION;
+    }
+
+    /// Cheap consistency checks so a damaged save fails to load instead of panicking later.
+    fn validate(&self) -> Result<(), String> {
+        let grid_ok = |g: &Vec<Vec<u8>>| g.len() == self.rows && g.iter().all(|r| r.len() == self.cols);
+        if self.rows == 0 || self.cols == 0
+            || self.map.len() != self.rows || self.map.iter().any(|r| r.len() != self.cols)
+            || !grid_ok(&self.comp_map) || !grid_ok(&self.player_map)
+        {
+            return Err(String::from("map sizes do not match the stated dimensions"));
+        }
+        let inside = |l: &Loc| l.r < self.rows && l.c < self.cols;
+        if self.cities.iter().any(|c| !inside(&c.loc)) {
+            return Err(String::from("a city is outside the map"));
+        }
+        fn pieces_inside(pieces: &[Piece], inside: &dyn Fn(&Loc) -> bool) -> bool {
+            pieces.iter().all(|p| inside(&p.loc) && pieces_inside(&p.cargo, inside))
+        }
+        if !pieces_inside(&self.pieces, &inside) {
+            return Err(String::from("a unit is outside the map"));
+        }
+        Ok(())
     }
 }
 

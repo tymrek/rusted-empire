@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::game::Game;
-    use crate::models::{Terrain, City, Loc, MoveResult, Owner, Piece, PieceType, UnitActivity};
+    use crate::models::{GameMode, Terrain, City, Loc, MoveResult, Owner, Piece, PieceType, UnitActivity};
 
     #[test]
     fn test_map_generation_dimensions() {
@@ -1664,5 +1664,125 @@ mod tests {
         let mut game = sentry_world(8, 8);
         game.process_turn();
         assert_eq!(game.pieces[0].activity, UnitActivity::Sentry);
+    }
+
+    // ---- save format: version, UI state, validation ----
+
+    fn save_to_json(game: &Game, name: &str) -> (std::path::PathBuf, serde_json::Value) {
+        let path = scratch_path(name);
+        game.save_game(path.to_str().unwrap()).unwrap();
+        let v = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        (path, v)
+    }
+
+    fn write_json(path: &std::path::Path, v: &serde_json::Value) {
+        std::fs::write(path, serde_json::to_string(v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn test_saves_carry_the_current_version() {
+        let game = Game::new(10, 10, 50);
+        let (path, v) = save_to_json(&game, "version.sav");
+        assert_eq!(v["save_version"], crate::game::SAVE_VERSION);
+        assert_eq!(Game::load_game(path.to_str().unwrap()).unwrap().save_version, crate::game::SAVE_VERSION);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_saves_from_before_versioning_still_load() {
+        let (path, mut v) = save_to_json(&Game::new(10, 10, 50), "legacy.sav");
+        v.as_object_mut().unwrap().remove("save_version");
+        write_json(&path, &v);
+        let loaded = Game::load_game(path.to_str().unwrap()).expect("legacy save should load");
+        assert_eq!(loaded.save_version, crate::game::SAVE_VERSION, "migrated to the current version");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_save_from_a_newer_build_is_refused_with_a_reason() {
+        let (path, mut v) = save_to_json(&Game::new(10, 10, 50), "newer.sav");
+        v["save_version"] = serde_json::json!(crate::game::SAVE_VERSION + 1);
+        write_json(&path, &v);
+        let err = Game::load_game(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("newer version"), "{}", err);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_view_state_is_not_saved_and_old_saves_with_it_are_cleaned() {
+        let mut game = Game::new(10, 10, 50);
+        game.viewport_center = Some(Loc { r: 3, c: 3 });
+        game.last_mouse_coord = Some((4, 4));
+        game.edit_cursor = Loc { r: 5, c: 5 };
+        game.msg_scroll = 9;
+        let (path, mut v) = save_to_json(&game, "ui.sav");
+        for key in ["viewport_center", "last_mouse_coord", "edit_cursor", "msg_scroll"] {
+            assert!(v.get(key).is_none(), "{} should not be written", key);
+        }
+        // a save written by an older build still contains them: they must be ignored
+        v["viewport_center"] = serde_json::json!({"r": 3, "c": 3});
+        v["last_mouse_coord"] = serde_json::json!([4, 4]);
+        v["edit_cursor"] = serde_json::json!({"r": 5, "c": 5});
+        v["msg_scroll"] = serde_json::json!(9);
+        write_json(&path, &v);
+        let loaded = Game::load_game(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.viewport_center, None);
+        assert_eq!(loaded.last_mouse_coord, None);
+        assert_eq!(loaded.edit_cursor, Loc { r: 0, c: 0 });
+        assert_eq!(loaded.msg_scroll, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_modal_modes_come_back_as_manual() {
+        for mode in [GameMode::Edit, GameMode::Auto, GameMode::PickDest(3), GameMode::Manual] {
+            let mut game = Game::new(10, 10, 50);
+            game.mode = mode;
+            let path = scratch_path("mode.sav");
+            game.save_game(path.to_str().unwrap()).unwrap();
+            let loaded = Game::load_game(path.to_str().unwrap()).unwrap();
+            assert_eq!(loaded.mode, GameMode::Manual, "saved in {:?}", mode);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn test_game_state_survives_the_round_trip() {
+        let mut game = Game::with_seed(60, 100, 50, 3);
+        game.setup_initial_states();
+        game.turn = 17;
+        game.log(String::from("hello"));
+        let path = scratch_path("state.sav");
+        game.save_game(path.to_str().unwrap()).unwrap();
+        let loaded = Game::load_game(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.turn, 17);
+        assert_eq!(loaded.map, game.map);
+        assert_eq!(loaded.cities.len(), game.cities.len());
+        assert_eq!(loaded.messages, game.messages);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_bad_saves_fail_with_a_reason_instead_of_panicking() {
+        let missing = scratch_path("does_not_exist.sav");
+        assert!(Game::load_game(missing.to_str().unwrap()).unwrap_err().contains("could not read"));
+
+        let garbage = scratch_path("garbage.sav");
+        std::fs::write(&garbage, "this is not json").unwrap();
+        assert!(Game::load_game(garbage.to_str().unwrap()).unwrap_err().contains("not a valid save"));
+        let _ = std::fs::remove_file(garbage);
+
+        // map shorter than the stated dimensions
+        let (path, mut v) = save_to_json(&Game::new(10, 10, 50), "damaged.sav");
+        v["map"].as_array_mut().unwrap().pop();
+        write_json(&path, &v);
+        assert!(Game::load_game(path.to_str().unwrap()).unwrap_err().contains("damaged"));
+
+        // a unit placed off the map
+        let mut game = Game::new(10, 10, 50);
+        game.pieces.push(test_piece(1, PieceType::Army, Owner::Player, 50, 50));
+        game.save_game(path.to_str().unwrap()).unwrap();
+        assert!(Game::load_game(path.to_str().unwrap()).unwrap_err().contains("outside the map"));
+        let _ = std::fs::remove_file(path);
     }
 }

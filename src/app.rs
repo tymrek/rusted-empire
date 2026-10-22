@@ -155,10 +155,10 @@ fn start_session(opts: Options) -> io::Result<Option<(Game, i32)>> {
     let mut preloaded_game = None;
     if let Some(filename) = opts.load_file {
         match Game::load_game(&filename) {
-            Some(loaded_game) => preloaded_game = Some(loaded_game),
-            None => {
+            Ok(loaded_game) => preloaded_game = Some(loaded_game),
+            Err(reason) => {
                 TerminalGuard::restore(); // leave the alternate screen so the message stays visible
-                eprintln!("Failed to load save file: {}", filename);
+                eprintln!("Failed to load save file: {}", reason);
                 return Ok(None);
             }
         }
@@ -1357,11 +1357,12 @@ fn idle_input(game: &mut Game, observer_mode: &mut bool) -> io::Result<bool> {
                         }
                     }
                     'l' => {
-                        if let Some(loaded_game) = Game::load_game("empire.sav") {
-                            *game = loaded_game;
-                            game.log(String::from("Game loaded from empire.sav."));
-                        } else {
-                            game.log(String::from("Failed to load empire.sav."));
+                        match Game::load_game("empire.sav") {
+                            Ok(loaded_game) => {
+                                *game = loaded_game;
+                                game.log(String::from("Game loaded from empire.sav."));
+                            }
+                            Err(reason) => game.log(format!("LOAD FAILED: {}", reason)),
                         }
                     }
                     _ => {
