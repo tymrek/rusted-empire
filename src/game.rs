@@ -14,7 +14,7 @@ pub struct Game {
     pub turn: i32,
     pub difficulty: u32,
     pub mode: GameMode,
-    pub map: Vec<Vec<u8>>,
+    pub map: Vec<Vec<Terrain>>,
     pub comp_map: Vec<Vec<u8>>,
     pub player_map: Vec<Vec<u8>>,
     pub cities: Vec<City>,
@@ -41,7 +41,7 @@ pub struct Game {
 
 impl Game {
     pub fn new(rows: usize, cols: usize, difficulty: u32) -> Self {
-        let map = vec![vec![b'.'; cols]; rows];
+        let map = vec![vec![Terrain::Sea; cols]; rows];
         let comp_map = vec![vec![0; cols]; rows];
         let player_map = vec![vec![0; cols]; rows];
         Self {
@@ -97,9 +97,9 @@ impl Game {
         for r in 0..self.rows {
             for c in 0..self.cols {
                 if self.rng.gen_range(0..100) < water_percent {
-                    self.map[r][c] = b'.';
+                    self.map[r][c] = Terrain::Sea;
                 } else {
-                    self.map[r][c] = b'#';
+                    self.map[r][c] = Terrain::Land;
                 }
             }
         }
@@ -108,20 +108,14 @@ impl Game {
             let mut next_map = self.map.clone();
             for r in 1..self.rows - 1 {
                 for c in 1..self.cols - 1 {
-                    let mut land_count = 0;
-                    for dr in -1..=1 {
-                        for dc in -1..=1 {
-                            if self.map[(r as i32 + dr) as usize][(c as i32 + dc) as usize] == b'#' {
-                                land_count += 1;
-                            }
-                        }
-                    }
-                    
-                    let is_land = self.map[r][c] == b'#';
+                    let here = Loc { r, c };
+                    let land_count = self.neighbors(here).filter(|&n| self.is_land(n)).count() + self.is_land(here) as usize;
+
+                    let is_land = self.map[r][c] == Terrain::Land;
                     if land_count >= 5 || (is_land && land_count >= 4) {
-                        next_map[r][c] = b'#';
+                        next_map[r][c] = Terrain::Land;
                     } else {
-                        next_map[r][c] = b'.';
+                        next_map[r][c] = Terrain::Sea;
                     }
                 }
             }
@@ -129,12 +123,12 @@ impl Game {
         }
 
         for r in 0..self.rows {
-            self.map[r][0] = b'.';
-            self.map[r][self.cols - 1] = b'.';
+            self.map[r][0] = Terrain::Sea;
+            self.map[r][self.cols - 1] = Terrain::Sea;
         }
         for c in 0..self.cols {
-            self.map[0][c] = b'.';
-            self.map[self.rows - 1][c] = b'.';
+            self.map[0][c] = Terrain::Sea;
+            self.map[self.rows - 1][c] = Terrain::Sea;
         }
     }
 
@@ -199,19 +193,28 @@ impl Game {
         false
     }
 
-    pub fn is_coastal(&self, loc: Loc) -> bool {
-        for dr in -1..=1 {
-            for dc in -1..=1 {
-                let nr = loc.r as i32 + dr;
-                let nc = loc.c as i32 + dc;
-                if nr >= 0 && nr < self.rows as i32 && nc >= 0 && nc < self.cols as i32 {
-                    if self.map[nr as usize][nc as usize] == b'.' {
-                        return true;
-                    }
+    /// The up-to-8 in-bounds tiles surrounding `loc` (not including `loc` itself).
+    pub fn neighbors(&self, loc: Loc) -> impl Iterator<Item = Loc> {
+        let (rows, cols) = (self.rows as i32, self.cols as i32);
+        (-1i32..=1).flat_map(move |dr| (-1i32..=1).map(move |dc| (dr, dc)))
+            .filter(|&d| d != (0, 0))
+            .filter_map(move |(dr, dc)| {
+                let (nr, nc) = (loc.r as i32 + dr, loc.c as i32 + dc);
+                if nr >= 0 && nr < rows && nc >= 0 && nc < cols {
+                    Some(Loc { r: nr as usize, c: nc as usize })
+                } else {
+                    None
                 }
-            }
-        }
-        false
+            })
+    }
+
+    pub fn is_land(&self, loc: Loc) -> bool {
+        self.map[loc.r][loc.c] == Terrain::Land
+    }
+
+    /// True if the tile, or any tile next to it, is sea.
+    pub fn is_coastal(&self, loc: Loc) -> bool {
+        !self.is_land(loc) || self.neighbors(loc).any(|n| !self.is_land(n))
     }
 
     pub fn is_tile_blocked_by_friend(&self, loc: Loc, moving_ptype: PieceType, owner: Owner) -> bool {
@@ -251,14 +254,14 @@ impl Game {
 
             for r in 1..self.rows - 1 {
                 for c in 1..self.cols - 1 {
-                    if self.map[r][c] == b'#' {
+                    if self.map[r][c] == Terrain::Land {
                         land_tiles.push(Loc { r, c });
                     }
                 }
             }
 
             if land_tiles.is_empty() {
-                self.map[self.rows / 2][self.cols / 2] = b'#';
+                self.map[self.rows / 2][self.cols / 2] = Terrain::Land;
                 land_tiles.push(Loc { r: self.rows / 2, c: self.cols / 2 });
             }
 
@@ -304,14 +307,10 @@ impl Game {
                         if !continent_cities.contains(&idx) { continent_cities.push(idx); }
                     }
 
-                    for dr in -1..=1 {
-                        for dc in -1..=1 {
-                            let nr = (loc.r as i32 + dr) as usize;
-                            let nc = (loc.c as i32 + dc) as usize;
-                            if nr < self.rows && nc < self.cols && !visited_land[nr][nc] && self.map[nr][nc] == b'#' {
-                                visited_land[nr][nc] = true;
-                                queue.push_back(Loc { r: nr, c: nc });
-                            }
+                    for n in self.neighbors(loc) {
+                        if !visited_land[n.r][n.c] && self.is_land(n) {
+                            visited_land[n.r][n.c] = true;
+                            queue.push_back(n);
                         }
                     }
                 }
@@ -473,7 +472,7 @@ impl Game {
     /// - an army that walks into the sea, or onto a transport that is full, drowns.
     /// Cities are handled separately (`is_fatal_city_entry`, `assault_city`).
     pub fn is_suicidal_terrain_entry(&self, ptype: PieceType, owner: Owner, loc: Loc) -> bool {
-        let is_land = self.map[loc.r][loc.c] == b'#';
+        let is_land = self.map[loc.r][loc.c] == Terrain::Land;
         let own_piece_here = |pred: &dyn Fn(&Piece) -> bool| {
             self.pieces.iter().any(|p| p.loc == loc && p.owner == owner && p.hits > 0 && pred(p))
         };
@@ -549,7 +548,7 @@ impl Game {
 
     pub fn attempt_move(&mut self, piece_idx: usize, target_loc: Loc) -> (MoveResult, String) {
         let ptype = self.pieces[piece_idx].ptype;
-        let is_land = self.map[target_loc.r][target_loc.c] == b'#';
+        let is_land = self.map[target_loc.r][target_loc.c] == Terrain::Land;
         
         let unit_owner = self.pieces[piece_idx].owner;
         let is_player = unit_owner == Owner::Player;
@@ -853,7 +852,7 @@ impl Game {
                 let target_c = (current_loc.c as i32 + dir.1) as usize;
 
                 if target_r < self.rows && target_c < self.cols {
-                    let is_land = self.map[target_r][target_c] == b'#';
+                    let is_land = self.map[target_r][target_c] == Terrain::Land;
                     let can_enter = match ptype {
                         PieceType::Army => is_land,
                         _ => !is_land,
@@ -901,7 +900,7 @@ impl Game {
 
                     if target_r < self.rows && target_c < self.cols {
                         if !visited[target_r][target_c] {
-                            let is_land = self.map[target_r][target_c] == b'#';
+                            let is_land = self.map[target_r][target_c] == Terrain::Land;
                             let can_enter = match ptype {
                                 PieceType::Army => is_land,
                                 PieceType::Fighter | PieceType::Satellite => true,
@@ -1053,7 +1052,7 @@ impl Game {
                         let next_loc = Loc { r: tr as usize, c: tc as usize };
                         if visited.contains(&next_loc) { continue; }
 
-                        let is_land = self.map[next_loc.r][next_loc.c] == b'#';
+                        let is_land = self.map[next_loc.r][next_loc.c] == Terrain::Land;
                         let can_enter = match ptype {
                             PieceType::Army => is_land || self.pieces.iter().any(|p| p.loc == next_loc && p.owner == Owner::Comp && p.ptype == PieceType::Transport && p.hits > 0 && p.cargo.len() < 6),
                             PieceType::Fighter | PieceType::Satellite => true,
@@ -1062,7 +1061,7 @@ impl Game {
 
                         if can_enter && !self.is_fatal_city_entry(ptype, Owner::Comp, next_loc) && !self.is_tile_blocked_by_friend(next_loc, ptype, Owner::Comp) {
                             let mut d = map_to_use[next_loc.r][next_loc.c];
-                            let current_is_land = self.map[p_loc.r][p_loc.c] == b'#';
+                            let current_is_land = self.map[p_loc.r][p_loc.c] == Terrain::Land;
                             
                             // Force armies on land to board adjacent available transports
                             if ptype == PieceType::Army && current_is_land && !is_land {
@@ -1128,7 +1127,7 @@ impl Game {
                         let c = p.loc.c as i32 + dc;
                         if r >= 0 && r < self.rows as i32 && c >= 0 && c < self.cols as i32 {
                             let loc_rc = Loc { r: r as usize, c: c as usize };
-                            if self.map[loc_rc.r][loc_rc.c] == b'#' {
+                            if self.map[loc_rc.r][loc_rc.c] == Terrain::Land {
                                 let near_enemy_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner != Owner::Comp);
                                 let near_friendly_city = self.cities.iter().any(|ct| ct.loc == loc_rc && ct.owner == Owner::Comp);
                                 if near_enemy_city || !near_friendly_city {
@@ -1158,6 +1157,7 @@ impl Game {
         let comp_cities_count = self.cities.iter().filter(|c| c.owner == Owner::Comp).count();
         let mut next_id = self.next_free_id();
 
+        let city_is_coastal: Vec<bool> = self.cities.iter().map(|c| self.is_coastal(c.loc)).collect();
         for (idx, city) in self.cities.iter_mut().enumerate() {
             if city.owner == Owner::Neutral {
                 continue;
@@ -1203,17 +1203,7 @@ impl Game {
                 });
 
                 if city.owner == Owner::Comp {
-                    let mut is_coastal = false;
-                    for dr in -1..=1 {
-                        for dc in -1..=1 {
-                            let nr = city.loc.r as i32 + dr;
-                            let nc = city.loc.c as i32 + dc;
-                            if nr >= 0 && nr < self.rows as i32 && nc >= 0 && nc < self.cols as i32 {
-                                if self.map[nr as usize][nc as usize] == b'.' { is_coastal = true; }
-                            }
-                        }
-                    }
-                    
+                    let is_coastal = city_is_coastal[idx];
                     if is_coastal {
                         let roll = self.rng.gen_range(0..100);
                         if comp_cities_count < 8 {
@@ -1410,7 +1400,7 @@ impl Game {
                 let target_c = (current_loc.c as i32 + dir.1) as usize;
 
                 if target_r < self.rows && target_c < self.cols {
-                    let is_land = self.map[target_r][target_c] == b'#';
+                    let is_land = self.map[target_r][target_c] == Terrain::Land;
                     let can_enter = match p.ptype {
                         PieceType::Army => is_land,
                         _ => !is_land,
@@ -1466,7 +1456,7 @@ impl Game {
 
                     if target_r < self.rows && target_c < self.cols {
                         if !visited[target_r][target_c] {
-                            let is_land = self.map[target_r][target_c] == b'#';
+                            let is_land = self.map[target_r][target_c] == Terrain::Land;
                             let can_enter = match p.ptype {
                                 PieceType::Army => is_land,
                                 PieceType::Fighter | PieceType::Satellite => true,
@@ -1526,7 +1516,7 @@ impl Game {
                 let target_c = (current_loc.c as i32 + dir.1) as usize;
 
                 if target_r < self.rows && target_c < self.cols {
-                    let is_land = self.map[target_r][target_c] == b'#';
+                    let is_land = self.map[target_r][target_c] == Terrain::Land;
                     let can_enter = match ptype {
                         PieceType::Army => is_land,
                         _ => !is_land,
@@ -1606,7 +1596,7 @@ impl Game {
 
                 if r < self.rows && c < self.cols {
                     let step_loc = Loc { r, c };
-                    let is_land = self.map[r][c] == b'#';
+                    let is_land = self.map[r][c] == Terrain::Land;
                     let friendly_city = self.cities.iter().any(|ct| ct.loc == step_loc && ct.owner == Owner::Player);
                     
                     let can_enter = match ptype {
@@ -1652,7 +1642,7 @@ impl Game {
                     let c = (loc.c as i32 + dir.1) as usize;
 
                     if r < self.rows && c < self.cols && !visited[r][c] {
-                        let is_land = self.map[r][c] == b'#';
+                        let is_land = self.map[r][c] == Terrain::Land;
                         let friendly_city = self.cities.iter().any(|ct| ct.loc == Loc { r, c } && ct.owner == Owner::Player);
                         let can_enter = match ptype {
                             PieceType::Army => is_land,
@@ -1734,7 +1724,7 @@ impl Game {
             }
 
             let target_loc = Loc { r: target_r as usize, c: target_c as usize };
-            let is_land = self.map[target_loc.r][target_loc.c] == b'#';
+            let is_land = self.map[target_loc.r][target_loc.c] == Terrain::Land;
             let friendly_city = self.cities.iter().any(|ct| ct.loc == target_loc && ct.owner == Owner::Player);
             
             let can_enter = match ptype {

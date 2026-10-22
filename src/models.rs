@@ -1,5 +1,34 @@
 use serde::{Serialize, Deserialize};
 
+/// One map tile. Serialized as the original ASCII byte (`b'#'` land, `b'.'` sea)
+/// so existing save files keep loading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub enum Terrain {
+    Sea,
+    Land,
+}
+
+impl From<Terrain> for u8 {
+    fn from(t: Terrain) -> u8 {
+        match t {
+            Terrain::Sea => b'.',
+            Terrain::Land => b'#',
+        }
+    }
+}
+
+impl TryFrom<u8> for Terrain {
+    type Error = String;
+    fn try_from(b: u8) -> Result<Self, String> {
+        match b {
+            b'.' => Ok(Terrain::Sea),
+            b'#' => Ok(Terrain::Land),
+            other => Err(format!("unknown terrain byte {}", other)),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveResult {
     Moved,

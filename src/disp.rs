@@ -1,5 +1,5 @@
 use crate::game::Game;
-use crate::models::{GameMode, Owner, PieceType, Loc};
+use crate::models::{Terrain, GameMode, Owner, PieceType, Loc};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use ratatui::{
@@ -163,10 +163,10 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                 }
 
                 let terrain_ch = game.map[r][c];
-                let mut style = if terrain_ch == b'#' { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Blue) };
+                let mut style = if terrain_ch == Terrain::Land { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Blue) };
                 if is_blink_target { style = style.bg(Color::White).fg(Color::Black); }
                 
-                if terrain_ch == b'#' {
+                if terrain_ch == Terrain::Land {
                     spans.push(Span::styled("#", style));
                 } else {
                     spans.push(Span::styled(".", style));
@@ -198,7 +198,7 @@ let mut sidebar_lines = vec![
             let loc = game.edit_cursor;
             
             if game.player_map[loc.r][loc.c] == 1 {
-                let terrain = if game.map[loc.r][loc.c] == b'#' { "Land" } else { "Sea" };
+                let terrain = if game.map[loc.r][loc.c] == Terrain::Land { "Land" } else { "Sea" };
                 sidebar_lines.push(Line::from(format!(" Terrain: {}", terrain)));
 
                 if let Some(city) = game.cities.iter().find(|c| c.loc == loc) {

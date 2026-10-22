@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::game::Game;
-    use crate::models::{City, Loc, MoveResult, Owner, Piece, PieceType, UnitActivity};
+    use crate::models::{Terrain, City, Loc, MoveResult, Owner, Piece, PieceType, UnitActivity};
 
     #[test]
     fn test_map_generation_dimensions() {
@@ -40,7 +40,7 @@ mod tests {
     #[test]
     fn test_fighter_fuel_depletion_and_crash() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10]; 
+        game.map = vec![vec![Terrain::Sea; 10]; 10]; 
         
         let fighter = Piece {
             id: 1,
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn test_fighter_refuel_at_city() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'#'; 10]; 10]; 
+        game.map = vec![vec![Terrain::Land; 10]; 10]; 
         
         game.cities.push(City {
             loc: Loc { r: 5, c: 6 },
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn test_cargo_boarding_limits() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10]; 
+        game.map = vec![vec![Terrain::Sea; 10]; 10]; 
 
         game.pieces.push(Piece {
             id: 1, ptype: PieceType::Transport, owner: Owner::Player,
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn test_combat_city_assault_consumption() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'#'; 10]; 10]; 
+        game.map = vec![vec![Terrain::Land; 10]; 10]; 
         
         game.cities.push(City {
             loc: Loc { r: 5, c: 5 }, owner: Owner::Neutral, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
@@ -330,14 +330,14 @@ mod tests {
         
         for r in 0..5 {
             for c in 0..5 {
-                game.map[r][c] = b'#';
+                game.map[r][c] = Terrain::Land;
                 game.player_map[r][c] = 1; 
             }
         }
         
-        game.map[1][2] = b'.';
-        game.map[2][2] = b'.';
-        game.map[3][2] = b'.';
+        game.map[1][2] = Terrain::Sea;
+        game.map[2][2] = Terrain::Sea;
+        game.map[3][2] = Terrain::Sea;
 
         game.player_map[2][4] = 0;
 
@@ -351,14 +351,14 @@ mod tests {
 
         let new_loc = game.pieces[0].loc;
         assert_ne!(new_loc, Loc { r: 2, c: 2 }, "Army must not step into the water wall");
-        assert_eq!(game.map[new_loc.r][new_loc.c], b'#', "Army must only step on land");
+        assert_eq!(game.map[new_loc.r][new_loc.c], Terrain::Land, "Army must only step on land");
         assert!(new_loc.c >= 1, "Army should not move backward away from the fog");
     }
 
     #[test]
     fn test_combat_unit_engagement() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'#'; 10]; 10]; 
+        game.map = vec![vec![Terrain::Land; 10]; 10]; 
         
         game.pieces.push(Piece {
             id: 1, ptype: PieceType::Army, owner: Owner::Player,
@@ -389,8 +389,8 @@ mod tests {
         for owner in [Owner::Comp, Owner::Neutral] {
             for ptype in [PieceType::PatrolBoat, PieceType::Destroyer, PieceType::Submarine, PieceType::Carrier, PieceType::Battleship, PieceType::Transport] {
                 let mut game = Game::new(10, 10, 50);
-                game.map = vec![vec![b'.'; 10]; 10];
-                game.map[5][6] = b'#';
+                game.map = vec![vec![Terrain::Sea; 10]; 10];
+                game.map[5][6] = Terrain::Land;
                 game.pieces.push(Piece {
                     id: 1, ptype, owner: Owner::Player,
                     loc: Loc { r: 5, c: 5 }, hits: ptype.max_hits(), moves_left: 2, activity: UnitActivity::Idle,
@@ -413,8 +413,8 @@ mod tests {
     #[test]
     fn test_ship_may_still_enter_its_own_city() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
-        game.map[5][6] = b'#';
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[5][6] = Terrain::Land;
         game.pieces.push(test_piece(1, PieceType::Destroyer, Owner::Player, 5, 5));
         game.cities.push(City {
             loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
@@ -428,8 +428,8 @@ mod tests {
     fn test_fighter_entering_enemy_city_is_shot_down() {
         for owner in [Owner::Comp, Owner::Neutral] {
             let mut game = Game::new(10, 10, 50);
-            game.map = vec![vec![b'.'; 10]; 10];
-            game.map[5][6] = b'#';
+            game.map = vec![vec![Terrain::Sea; 10]; 10];
+            game.map[5][6] = Terrain::Land;
             game.pieces.push(test_piece(1, PieceType::Fighter, Owner::Player, 5, 5));
             game.cities.push(City {
                 loc: Loc { r: 5, c: 6 }, owner, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
@@ -443,8 +443,8 @@ mod tests {
     #[test]
     fn test_fighter_may_land_in_its_own_city() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
-        game.map[5][6] = b'#';
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[5][6] = Terrain::Land;
         game.pieces.push(test_piece(1, PieceType::Fighter, Owner::Player, 5, 5));
         game.cities.push(City {
             loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
@@ -458,8 +458,8 @@ mod tests {
     fn test_automated_movers_never_fly_into_enemy_cities() {
         // Standing orders must not throw a fighter away: marching in a direction stops short.
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
-        game.map[5][6] = b'#';
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[5][6] = Terrain::Land;
         let mut f = test_piece(1, PieceType::Fighter, Owner::Player, 5, 5);
         f.activity = UnitActivity::Dir(0, 1);
         game.pieces.push(f);
@@ -475,8 +475,8 @@ mod tests {
     fn test_computer_units_never_suicide_into_player_cities() {
         // A computer ship and fighter heading for a player city must hold short of it.
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
-        game.map[5][6] = b'#';
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[5][6] = Terrain::Land;
         game.cities.push(City {
             loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(),
         });
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn test_combat_submarine_stealth() {
         let mut game = Game::new(10, 15, 50);
-        game.map = vec![vec![b'.'; 15]; 10];
+        game.map = vec![vec![Terrain::Sea; 15]; 10];
 
         game.pieces.push(Piece {
             id: 1, ptype: PieceType::Submarine, owner: Owner::Comp,
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn test_city_stacking_and_fighter_flyover() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
         
         game.cities.push(City { loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new() });
 
@@ -597,8 +597,8 @@ mod tests {
     #[test]
     fn test_logistics_auto_unload_on_coast() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10]; 
-        game.map[5][6] = b'#'; 
+        game.map = vec![vec![Terrain::Sea; 10]; 10]; 
+        game.map[5][6] = Terrain::Land; 
 
         let transport = Piece {
             id: 1, ptype: PieceType::Transport, owner: Owner::Comp,
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn test_order_inheritance_global_vs_local() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'#'; 10]; 10];
+        game.map = vec![vec![Terrain::Land; 10]; 10];
         
         game.cities.push(City { 
             loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, 
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn test_carrier_fighter_landing_same_tile() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
 
         game.pieces.push(Piece { 
             id: 1, ptype: PieceType::Carrier, owner: Owner::Player, 
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn test_mobile_sector_load_move_unload_logistics() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10]; 
+        game.map = vec![vec![Terrain::Sea; 10]; 10]; 
 
         // 0: Transport at (5,5)
         game.pieces.push(Piece {
@@ -726,8 +726,8 @@ mod tests {
     #[test]
     fn test_mobile_sector_drag_exploit_limit() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
-        game.map[5][5] = b'#';
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[5][5] = Terrain::Land;
 
         // Transport at (5,5)
         game.pieces.push(Piece {
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn test_logistics_transport_wait_boarding() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
 
         // Player Transport at (5,5)
         game.pieces.push(Piece {
@@ -785,7 +785,7 @@ mod tests {
     #[test]
     fn test_ai_flow_field_pathfinding() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'#'; 10]; 10]; // All land
+        game.map = vec![vec![Terrain::Land; 10]; 10]; // All land
 
         // Player City at (1,1)
         game.cities.push(City {
@@ -840,7 +840,7 @@ mod tests {
     #[test]
     fn test_satellite_orbital_immunity() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'#'; 10]; 10]; 
+        game.map = vec![vec![Terrain::Land; 10]; 10]; 
 
         // Enemy Satellite
         game.pieces.push(Piece {
@@ -866,7 +866,7 @@ mod tests {
     #[test]
     fn test_fighter_grope_bingo_fuel_return() {
         let mut game = Game::new(10, 20, 50);
-        game.map = vec![vec![b'.'; 20]; 10];
+        game.map = vec![vec![Terrain::Sea; 20]; 10];
         
         game.cities.push(City {
             loc: Loc { r: 5, c: 5 },
@@ -922,7 +922,7 @@ mod tests {
     #[test]
     fn test_turn_refreshes_full_moves() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
         let mut fighter = test_piece(1, PieceType::Fighter, Owner::Player, 5, 5);
         fighter.moves_left = 5; // spent 3 of 8 last turn
         let mut idle_army = test_piece(2, PieceType::Army, Owner::Player, 1, 1);
@@ -939,8 +939,8 @@ mod tests {
     #[test]
     fn test_new_piece_ids_skip_cargo_ids() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
-        game.map[2][2] = b'#';
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[2][2] = Terrain::Land;
         let mut transport = test_piece(1, PieceType::Transport, Owner::Player, 5, 5);
         transport.cargo.push(test_piece(2, PieceType::Army, Owner::Player, 5, 5));
         game.pieces.push(transport);
@@ -964,8 +964,8 @@ mod tests {
     #[test]
     fn test_piece_ids_not_reused_after_death() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
-        game.map[2][2] = b'#';
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[2][2] = Terrain::Land;
         game.cities.push(City {
             loc: Loc { r: 2, c: 2 },
             owner: Owner::Player,
@@ -1000,9 +1000,9 @@ mod tests {
     /// 10x10 map: land on row 5 columns 4..=7, water elsewhere.
     fn combat_world() -> Game {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
         for c in 4..=7 {
-            game.map[5][c] = b'#';
+            game.map[5][c] = Terrain::Land;
         }
         game
     }
@@ -1069,10 +1069,10 @@ mod tests {
     fn test_same_plane_defender_prefers_highest_original_type() {
         // Two enemy surface units in one tile (as in a city): the destroyer outranks the patrol boat.
         let mut game = combat_world();
-        game.map[5][6] = b'.';
+        game.map[5][6] = Terrain::Sea;
         let mut attacker = test_piece(1, PieceType::Battleship, Owner::Player, 5, 5);
         attacker.hits = 1000;
-        game.map[5][5] = b'.';
+        game.map[5][5] = Terrain::Sea;
         game.pieces.push(attacker);
         game.pieces.push(test_piece(2, PieceType::Destroyer, Owner::Comp, 5, 6)); // listed first...
         game.pieces.push(test_piece(3, PieceType::PatrolBoat, Owner::Comp, 5, 6));
@@ -1129,7 +1129,7 @@ mod tests {
     /// Player army at (5,4) next to a Comp city at (5,5) full of defenders.
     fn city_assault_world() -> Game {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'#'; 10]; 10];
+        game.map = vec![vec![Terrain::Land; 10]; 10];
         game.cities.push(City {
             loc: Loc { r: 5, c: 5 },
             owner: Owner::Comp,
@@ -1206,8 +1206,8 @@ mod tests {
 
     fn shore_world(attacker: PieceType, attacker_hits: i32) -> Game {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
-        game.map[5][6] = b'#';
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[5][6] = Terrain::Land;
         let mut ship = test_piece(1, attacker, Owner::Player, 5, 5);
         ship.hits = attacker_hits;
         game.pieces.push(ship);
@@ -1239,7 +1239,7 @@ mod tests {
     fn test_ship_defending_at_sea_is_not_broken_up() {
         // The break-up rule is for a ship that initiates the attack, not one that defends.
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
         let mut fighter = test_piece(1, PieceType::Fighter, Owner::Comp, 5, 5);
         fighter.hits = 1;
         let mut ship = test_piece(2, PieceType::Battleship, Owner::Player, 5, 6);
@@ -1295,8 +1295,8 @@ mod tests {
 
     fn sea_world(army_hits: i32) -> Game {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![b'.'; 10]; 10];
-        game.map[5][5] = b'#'; // the army stands on land, the sea is to its east
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[5][5] = Terrain::Land; // the army stands on land, the sea is to its east
         let mut army = test_piece(1, PieceType::Army, Owner::Player, 5, 5);
         army.hits = army_hits;
         game.pieces.push(army);
@@ -1345,7 +1345,7 @@ mod tests {
     #[test]
     fn test_army_stepping_off_a_transport_into_open_sea_drowns() {
         let mut game = sea_world(1);
-        game.map[5][5] = b'.'; // the army is on a transport at sea
+        game.map[5][5] = Terrain::Sea; // the army is on a transport at sea
         game.pieces.push(test_piece(2, PieceType::Transport, Owner::Player, 5, 5));
         let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
         assert_eq!(result, MoveResult::CombatLost);
@@ -1357,7 +1357,7 @@ mod tests {
         let east = Loc { r: 5, c: 6 };
         assert!(game.suicidal_move_prompt(PieceType::Army, Owner::Player, east).unwrap().contains("go to sea"));
         assert!(game.suicidal_move_prompt(PieceType::Army, Owner::Player, Loc { r: 5, c: 4 }).is_some()); // more sea
-        game.map[5][4] = b'#';
+        game.map[5][4] = Terrain::Land;
         assert!(game.suicidal_move_prompt(PieceType::Army, Owner::Player, Loc { r: 5, c: 4 }).is_none(), "land is safe");
         assert!(game.suicidal_move_prompt(PieceType::Destroyer, Owner::Player, Loc { r: 5, c: 4 }).unwrap().contains("ashore"));
         assert!(game.suicidal_move_prompt(PieceType::Destroyer, Owner::Player, east).is_none(), "sea is safe for ships");
@@ -1365,7 +1365,7 @@ mod tests {
 
     // ---- seeded RNG ----
 
-    fn snapshot(game: &Game) -> (Vec<Vec<u8>>, Vec<(usize, usize, Owner)>) {
+    fn snapshot(game: &Game) -> (Vec<Vec<Terrain>>, Vec<(usize, usize, Owner)>) {
         (game.map.clone(), game.cities.iter().map(|c| (c.loc.r, c.loc.c, c.owner)).collect())
     }
 
@@ -1391,7 +1391,7 @@ mod tests {
     fn test_same_seed_gives_identical_combat() {
         let outcome = |seed: u64| {
             let mut game = Game::with_seed(10, 10, 50, seed);
-            game.map = vec![vec![b'#'; 10]; 10];
+            game.map = vec![vec![Terrain::Land; 10]; 10];
             game.pieces.push(test_piece(0, PieceType::Army, Owner::Player, 5, 5));
             game.pieces.push(test_piece(1, PieceType::Army, Owner::Comp, 5, 6));
             game.pieces[0].hits = 50;
@@ -1401,5 +1401,39 @@ mod tests {
         };
         assert_eq!(outcome(7), outcome(7));
         assert!((0..20).any(|s| outcome(s) != outcome(7)), "different seeds should vary");
+    }
+
+    // ---- Terrain / neighbors ----
+
+    #[test]
+    fn test_neighbors_clamps_to_the_map() {
+        let game = Game::new(5, 6, 50);
+        let mut corner: Vec<_> = game.neighbors(Loc { r: 0, c: 0 }).map(|l| (l.r, l.c)).collect();
+        corner.sort();
+        assert_eq!(corner, vec![(0, 1), (1, 0), (1, 1)]);
+        assert_eq!(game.neighbors(Loc { r: 4, c: 5 }).count(), 3);
+        assert_eq!(game.neighbors(Loc { r: 0, c: 3 }).count(), 5);
+        let middle: Vec<_> = game.neighbors(Loc { r: 2, c: 2 }).collect();
+        assert_eq!(middle.len(), 8);
+        assert!(!middle.contains(&Loc { r: 2, c: 2 }), "a tile is not its own neighbor");
+    }
+
+    #[test]
+    fn test_is_coastal_uses_neighbors() {
+        let mut game = Game::new(7, 7, 50);
+        game.map = vec![vec![Terrain::Land; 7]; 7];
+        assert!(!game.is_coastal(Loc { r: 3, c: 3 }));
+        game.map[2][2] = Terrain::Sea; // diagonal neighbor
+        assert!(game.is_coastal(Loc { r: 3, c: 3 }));
+        assert!(!game.is_coastal(Loc { r: 5, c: 5 }));
+    }
+
+    #[test]
+    fn test_terrain_saves_as_the_original_bytes() {
+        let json = serde_json::to_string(&vec![Terrain::Land, Terrain::Sea]).unwrap();
+        assert_eq!(json, "[35,46]");
+        let back: Vec<Terrain> = serde_json::from_str("[35,46]").unwrap();
+        assert_eq!(back, vec![Terrain::Land, Terrain::Sea]);
+        assert!(serde_json::from_str::<Vec<Terrain>>("[7]").is_err());
     }
 }
