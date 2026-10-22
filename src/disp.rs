@@ -21,6 +21,24 @@ fn get_terminal() -> std::sync::MutexGuard<'static, TuiTerminal> {
     }).lock().unwrap()
 }
 
+/// The map rows and columns shown in a viewport of `view_height` x `view_width` squares
+/// centred on `center`. On a normal map this is a window clamped to the map. On a torus
+/// map (`-t`) the window wraps across the seams and shows only playable squares.
+pub fn view_axes(game: &Game, center: Loc, view_height: usize, view_width: usize) -> (Vec<usize>, Vec<usize>) {
+    if game.torus && game.rows > 2 && game.cols > 2 {
+        let h = view_height.min(game.rows - 2);
+        let w = view_width.min(game.cols - 2);
+        let rows = (0..h).filter_map(|i| game.offset(center, i as i32 - (h / 2) as i32, 0)).map(|l| l.r).collect();
+        let cols = (0..w).filter_map(|i| game.offset(center, 0, i as i32 - (w / 2) as i32)).map(|l| l.c).collect();
+        return (rows, cols);
+    }
+    let start_r = center.r.saturating_sub(view_height / 2).min(game.rows.saturating_sub(view_height));
+    let end_r = (start_r + view_height).min(game.rows);
+    let start_c = center.c.saturating_sub(view_width / 2).min(game.cols.saturating_sub(view_width));
+    let end_c = (start_c + view_width).min(game.cols);
+    ((start_r..end_r).collect(), (start_c..end_c).collect())
+}
+
 pub fn refresh_display_with_input(game: &Game, prompt: &str) {
     refresh_display_with_input_blinking(game, prompt, None);
 }
@@ -73,18 +91,16 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         let view_height = map_area.height.saturating_sub(2) as usize;
         let view_width = map_area.width.saturating_sub(2) as usize;
 
-        let half_h = view_height / 2;
-        let half_w = view_width / 2;
 
-        let start_r = center_loc.r.saturating_sub(half_h).min(game.rows.saturating_sub(view_height));
-        let end_r = (start_r + view_height).min(game.rows);
-
-        let start_c = center_loc.c.saturating_sub(half_w).min(game.cols.saturating_sub(view_width));
-        let end_c = (start_c + view_width).min(game.cols);
+        let (row_coords, col_coords) = view_axes(game, center_loc, view_height, view_width);
+        let mut in_rows = vec![false; game.rows];
+        let mut in_cols = vec![false; game.cols];
+        for &r in &row_coords { in_rows[r] = true; }
+        for &c in &col_coords { in_cols[c] = true; }
 
         let mut viewport_pieces = HashMap::new();
         for (i, p) in game.pieces.iter().enumerate() {
-            if p.loc.r >= start_r && p.loc.r < end_r && p.loc.c >= start_c && p.loc.c < end_c {
+            if in_rows[p.loc.r] && in_cols[p.loc.c] {
                 if game.is_visible_to(i, Owner::Player) {
                     viewport_pieces.entry(p.loc).or_insert(p); 
                 }
@@ -93,15 +109,15 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
 
         let mut viewport_cities = HashMap::new();
         for city in game.cities.iter() {
-            if city.loc.r >= start_r && city.loc.r < end_r && city.loc.c >= start_c && city.loc.c < end_c {
+            if in_rows[city.loc.r] && in_cols[city.loc.c] {
                 viewport_cities.entry(city.loc).or_insert(city);
             }
         }
 
         let mut lines = Vec::new();
-        for r in start_r..end_r {
+        for &r in &row_coords {
             let mut spans = Vec::new();
-            for c in start_c..end_c {
+            for &c in &col_coords {
                 let loc = Loc { r, c };
                 let is_explored = game.player_map[r][c] == 1;
 
