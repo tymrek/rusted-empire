@@ -39,7 +39,7 @@ pub enum MoveResult {
     InvalidMove,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 pub enum Owner {
     Player,
     Comp,
@@ -140,6 +140,35 @@ impl PieceType {
             PieceType::Transport => 3,
             PieceType::Satellite => 10,
         }
+    }
+
+    /// The kind of piece this one carries, if any (transports carry armies, carriers
+    /// carry fighters).
+    pub fn cargo_type(&self) -> Option<PieceType> {
+        match self {
+            PieceType::Transport => Some(PieceType::Army),
+            PieceType::Carrier => Some(PieceType::Fighter),
+            _ => None,
+        }
+    }
+
+    /// How many pieces a carrier of this type holds with `hits` hits left, as in the
+    /// original's `obj_capacity`: full capacity scaled by remaining health, rounded up.
+    pub fn capacity_for_hits(&self, hits: i32) -> usize {
+        let full = match self {
+            PieceType::Transport => 6,
+            PieceType::Carrier => 8,
+            _ => return 0,
+        };
+        if hits <= 0 {
+            return 0;
+        }
+        ((full * hits + self.max_hits() - 1) / self.max_hits()) as usize
+    }
+
+    /// Pieces that fly: they cross land and sea alike.
+    pub fn flies(&self) -> bool {
+        matches!(self, PieceType::Fighter | PieceType::Satellite)
     }
 
     pub fn is_naval(&self) -> bool {
