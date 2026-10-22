@@ -3,6 +3,12 @@ use serde::{Serialize, Deserialize};
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 
+/// Percent of the playable map that is sea (the original game's default, `-w 70`).
+const WATER_RATIO: usize = 70;
+/// Number of smoothing passes over the height map (the original's default, `-s 5`).
+const SMOOTH_PASSES: usize = 5;
+const MAX_HEIGHT: usize = 999;
+
 fn fresh_rng() -> StdRng {
     StdRng::from_entropy()
 }
@@ -108,45 +114,82 @@ impl Game {
         self.rng = StdRng::seed_from_u64(seed);
     }
 
+    /// Builds the land/water map the way the original game does: random heights, smoothed
+    /// by repeated 3x3 averaging (so land and water clump), then the water line is placed
+    /// so that exactly `WATER_RATIO` percent of the playable (non-border) squares are sea.
+    /// Squares tied at the water line are split at random to hit the ratio exactly. The
+    /// outer ring of the map is always sea.
     pub fn generate_map(&mut self) {
-        let water_percent = 62; 
-        let smooth_passes = 5;
+        let (rows, cols) = (self.rows, self.cols);
+        let size = rows * cols;
+        let mut from: Vec<u32> = (0..size).map(|_| self.rng.gen_range(0..MAX_HEIGHT as u32)).collect();
+        let mut to = vec![0u32; size];
 
-        for r in 0..self.rows {
-            for c in 0..self.cols {
-                if self.rng.gen_range(0..100) < water_percent {
-                    self.map[r][c] = Terrain::Sea;
-                } else {
-                    self.map[r][c] = Terrain::Land;
+        // The original works on a flat array, so "neighbours" of an edge cell wrap into the
+        // adjacent row, and anything off either end of the array counts as the cell itself.
+        let w = cols as isize;
+        let offsets = [-w - 1, -w, -w + 1, -1, 1, w - 1, w, w + 1];
+        for _ in 0..SMOOTH_PASSES {
+            for j in 0..size {
+                let mut sum = from[j];
+                for off in offsets {
+                    let loc = j as isize + off;
+                    let loc = if loc < 0 || loc >= size as isize { j } else { loc as usize };
+                    sum += from[loc];
                 }
+                to[j] = sum / 9;
+            }
+            std::mem::swap(&mut from, &mut to);
+        }
+        let height = from;
+
+        let on_board = |i: usize| {
+            let (r, c) = (i / cols, i % cols);
+            !(r == 0 || r == rows - 1 || c == 0 || c == cols - 1)
+        };
+        let mut height_count = vec![0usize; MAX_HEIGHT + 1];
+        let mut playable = 0usize;
+        for i in 0..size {
+            if on_board(i) {
+                height_count[height[i] as usize] += 1;
+                playable += 1;
             }
         }
 
-        for _ in 0..smooth_passes {
-            let mut next_map = self.map.clone();
-            for r in 1..self.rows - 1 {
-                for c in 1..self.cols - 1 {
-                    let here = Loc { r, c };
-                    let land_count = self.neighbors(here).filter(|&n| self.is_land(n)).count() + self.is_land(here) as usize;
+        // Leave enough land for every city, then find the height at which we have enough water.
+        let num_city = size / 85;
+        let mut target_water = playable * WATER_RATIO / 100;
+        if target_water > playable.saturating_sub(num_city) {
+            target_water = playable.saturating_sub(num_city);
+        }
+        let mut water_line = MAX_HEIGHT;
+        let mut sum = 0usize;
+        for (h, &count) in height_count.iter().enumerate() {
+            if sum + count >= target_water {
+                water_line = h;
+                break;
+            }
+            sum += count;
+        }
+        let water_at_line = target_water - sum;
 
-                    let is_land = self.map[r][c] == Terrain::Land;
-                    if land_count >= 5 || (is_land && land_count >= 4) {
-                        next_map[r][c] = Terrain::Land;
-                    } else {
-                        next_map[r][c] = Terrain::Sea;
-                    }
+        let mut tied = Vec::new();
+        for i in 0..size {
+            let (r, c) = (i / cols, i % cols);
+            if !on_board(i) || (height[i] as usize) < water_line {
+                self.map[r][c] = Terrain::Sea;
+            } else {
+                self.map[r][c] = Terrain::Land;
+                if height[i] as usize == water_line {
+                    tied.push(i);
                 }
             }
-            self.map = next_map;
         }
-
-        for r in 0..self.rows {
-            self.map[r][0] = Terrain::Sea;
-            self.map[r][self.cols - 1] = Terrain::Sea;
-        }
-        for c in 0..self.cols {
-            self.map[0][c] = Terrain::Sea;
-            self.map[self.rows - 1][c] = Terrain::Sea;
+        // Randomly turn just enough of the squares tied at the line into water.
+        for i in 0..water_at_line.min(tied.len()) {
+            let choice = i + self.rng.gen_range(0..tied.len() - i);
+            tied.swap(i, choice);
+            self.map[tied[i] / cols][tied[i] % cols] = Terrain::Sea;
         }
     }
 
@@ -252,6 +295,36 @@ impl Game {
         has_blocker && !can_board
     }
 
+    /// Picks city sites the way the original does: choose random land squares one at a
+    /// time, discarding land closer than `min_dist` to a chosen city. The minimum distance
+    /// starts at the square root of the expected land per city and is reduced by one each
+    /// time the candidates run out, so the full number of cities is always placed.
+    pub(crate) fn place_cities(&mut self, land: &[Loc], count: usize) -> Vec<Loc> {
+        let playable = (self.rows - 2) * (self.cols - 2);
+        let expected_land = playable - playable * WATER_RATIO / 100;
+        let mut min_dist = ((expected_land / count.max(1)) as f64).sqrt() as i32;
+        let mut placed: Vec<Loc> = Vec::new();
+        let mut candidates: Vec<Loc> = land.to_vec();
+        while placed.len() < count.min(land.len()) {
+            if candidates.is_empty() {
+                if !placed.is_empty() && min_dist > 0 {
+                    min_dist -= 1;
+                }
+                candidates = land.iter().cloned()
+                    .filter(|l| !placed.contains(l) && placed.iter().all(|p| p.dist(l) >= min_dist))
+                    .collect();
+                if candidates.is_empty() {
+                    break; // no land left at all
+                }
+                continue;
+            }
+            let loc = candidates.swap_remove(self.rng.gen_range(0..candidates.len()));
+            placed.push(loc);
+            candidates.retain(|l| loc.dist(l) >= min_dist);
+        }
+        placed
+    }
+
     pub fn setup_initial_states(&mut self) {
         let mut best_score = -1;
         let mut best_map = Vec::new();
@@ -278,22 +351,8 @@ impl Game {
                 land_tiles.push(Loc { r: self.rows / 2, c: self.cols / 2 });
             }
 
-            for i in 0..land_tiles.len() {
-                let j = self.rng.gen_range(0..land_tiles.len());
-                land_tiles.swap(i, j);
-            }
-
             let target_cities = (self.rows * self.cols) / 85;
-            let mut chosen_city_locs: Vec<Loc> = Vec::new();
-
-            for loc in land_tiles {
-                if chosen_city_locs.len() >= target_cities { break; }
-                let mut too_close = false;
-                for &c_loc in &chosen_city_locs {
-                    if c_loc.dist(&loc) < 6 { too_close = true; break; }
-                }
-                if !too_close { chosen_city_locs.push(loc); }
-            }
+            let chosen_city_locs = self.place_cities(&land_tiles, target_cities);
 
             for loc in chosen_city_locs {
                 self.cities.push(City {
