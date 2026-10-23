@@ -25,7 +25,8 @@ pub struct Options {
     pub level: Option<usize>,
     /// `--turns N`: give up on a game after this many turns.
     pub max_turns: i32,
-    /// `--stalemate N`: end a game after this many turns in which no city changed hands.
+    /// `--stalemate N`: end a game after this many turns in which neither side made
+    /// progress, i.e. held more cities than it ever had before.
     pub stalemate_turns: i32,
 }
 
@@ -43,7 +44,9 @@ pub enum Outcome {
     /// One side is down to under a third of the other's cities and armies (the original's
     /// rule for the computer acknowledging defeat, applied to both sides).
     Resigned(Owner),
-    /// No city changed hands for `stalemate_turns` turns.
+    /// Neither side made progress for `stalemate_turns` turns. Cities trading hands
+    /// back and forth is not progress: an even war of attrition can go on for thousands
+    /// of turns while the unit count (and the time per turn) keeps growing.
     Stalemate,
     /// Reached `max_turns`.
     TurnLimit,
@@ -121,9 +124,9 @@ pub fn play_one(opts: &Options, seed: u64) -> GameResult {
         game.cities[c].work = 0;
     }
 
-    let owners = |g: &Game| g.cities.iter().map(|c| c.owner).collect::<Vec<_>>();
-    let mut last_owners = owners(&game);
-    let mut last_change = game.turn;
+    let held = |g: &Game, o: Owner| g.cities.iter().filter(|c| c.owner == o).count();
+    let mut best = [held(&game, Owner::Player), held(&game, Owner::Comp)];
+    let mut last_progress = game.turn;
     let outcome = loop {
         game.process_turn();
         if let Some(msg) = game.check_game_over() {
@@ -135,11 +138,11 @@ pub fn play_one(opts: &Options, seed: u64) -> GameResult {
         if outclassed(&game, Owner::Player) {
             break Outcome::Resigned(Owner::Player);
         }
-        let now = owners(&game);
-        if now != last_owners {
-            last_owners = now;
-            last_change = game.turn;
-        } else if game.turn - last_change >= opts.stalemate_turns {
+        let now = [held(&game, Owner::Player), held(&game, Owner::Comp)];
+        if now[0] > best[0] || now[1] > best[1] {
+            best = [best[0].max(now[0]), best[1].max(now[1])];
+            last_progress = game.turn;
+        } else if game.turn - last_progress >= opts.stalemate_turns {
             break Outcome::Stalemate;
         }
         if game.turn >= opts.max_turns {
