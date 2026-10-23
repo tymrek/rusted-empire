@@ -824,13 +824,17 @@ impl Game {
             city.owner = unit_owner;
             city.work = 0;
             city.default_orders.clear();
-            if unit_owner == Owner::Comp {
+            if unit_owner == Owner::Comp || self.player_ai {
                 // A captured city starts from scratch, so even armies pay the retooling cost.
                 city.prod = PieceType::Army;
                 city.work = retool_work(PieceType::Army);
-                // The computer picks what the city really builds at the start of its next
-                // move (`comp_prod`), as the original does for a city with no production.
-                self.comp_new_cities.push(c_idx);
+                // The AI picks what the city really builds at the start of its next move
+                // (`comp_prod`), as the original does for a city with no production.
+                if unit_owner == Owner::Comp {
+                    self.comp_new_cities.push(c_idx);
+                } else {
+                    self.pending_cities.push(c_idx);
+                }
             }
 
             if is_player {

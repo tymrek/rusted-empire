@@ -114,9 +114,11 @@ pub fn play_one(opts: &Options, seed: u64) -> GameResult {
     let level = opts.level.unwrap_or_else(|| fair_level(&game)).min(levels - 1);
     game.choose_start(level);
     game.player_ai = true;
-    // The player's starting city builds armies, as the computer's does.
+    // The player's starting city builds armies from a standing start, exactly as the
+    // computer's does (no retooling penalty), so neither side gets a head start.
     if let Some(c) = game.cities.iter().position(|c| c.owner == Owner::Player) {
-        game.set_production(c, PieceType::Army, true);
+        game.cities[c].prod = PieceType::Army;
+        game.cities[c].work = 0;
     }
 
     let owners = |g: &Game| g.cities.iter().map(|c| c.owner).collect::<Vec<_>>();
