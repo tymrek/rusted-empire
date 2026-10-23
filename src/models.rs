@@ -1,4 +1,14 @@
 use serde::{Serialize, Deserialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Rule experiments for the headless rig: put back an original rule in place of one of
+/// this port's deliberate changes, to measure what the change does. Never set in play.
+pub static ORIGINAL_SIGHT: AtomicBool = AtomicBool::new(false);
+/// See `ORIGINAL_SIGHT`: destroyers find submarines only next to them, like everything else.
+pub static ADJACENT_SUB_DETECTION: AtomicBool = AtomicBool::new(false);
+
+pub fn original_sight() -> bool { ORIGINAL_SIGHT.load(Ordering::Relaxed) }
+pub fn adjacent_sub_detection() -> bool { ADJACENT_SUB_DETECTION.load(Ordering::Relaxed) }
 
 /// One map tile. Serialized as the original ASCII byte (`b'#'` land, `b'.'` sea)
 /// so existing save files keep loading.
@@ -121,6 +131,10 @@ impl PieceType {
     }
 
     pub fn sight_range(&self) -> i32 {
+        if original_sight() {
+            // the original: everything sees the squares next to it, satellites two out
+            return if *self == PieceType::Satellite { 2 } else { 1 };
+        }
         match self {
             PieceType::Army => 2,
             PieceType::Fighter => 6,

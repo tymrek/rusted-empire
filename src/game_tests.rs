@@ -1685,6 +1685,19 @@ mod tests {
     }
 
     #[test]
+    fn test_saves_from_before_scoring_still_load() {
+        // The first builds that could save had no score fields at all.
+        let (path, mut v) = save_to_json(&Game::new(10, 10, 50), "unscored.sav");
+        for key in ["save_version", "player_score", "comp_score", "next_id", "torus", "moved_this_turn", "player_view"] {
+            v.as_object_mut().unwrap().remove(key);
+        }
+        write_json(&path, &v);
+        let loaded = Game::load_game(path.to_str().unwrap()).expect("the oldest saves should load");
+        assert_eq!((loaded.player_score, loaded.comp_score), (0, 0));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn test_save_from_a_newer_build_is_refused_with_a_reason() {
         let (path, mut v) = save_to_json(&Game::new(10, 10, 50), "newer.sav");
         v["save_version"] = serde_json::json!(crate::game::SAVE_VERSION + 1);

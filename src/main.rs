@@ -40,6 +40,13 @@ fn main() -> ExitCode {
 
     if args.iter().any(|a| a == "--headless") {
         let mut opts = headless::Options { seed, small: args.iter().any(|a| a == "--small"), ..Default::default() };
+        // rule experiments (see models::ORIGINAL_SIGHT)
+        if args.iter().any(|a| a == "--original-sight") {
+            models::ORIGINAL_SIGHT.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if args.iter().any(|a| a == "--adjacent-subs") {
+            models::ADJACENT_SUB_DETECTION.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let numbers = (number("--games"), number("--level"), number("--turns"), number("--stalemate"));
         match numbers {
             (Ok(games), Ok(level), Ok(turns), Ok(stalemate)) => {

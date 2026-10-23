@@ -144,7 +144,10 @@ pub struct Game {
     #[serde(skip)]
     pub messages_logged: u64,
     pub pending_cities: Vec<usize>,
+    // The very first saves predate scoring; they start from zero.
+    #[serde(default)]
     pub player_score: u32,
+    #[serde(default)]
     pub comp_score: u32,
     pub default_orders: Vec<(PieceType, UnitActivity)>,
     /// Next piece id to hand out. Ids are never reused, even after a piece dies
@@ -474,7 +477,7 @@ impl Game {
                 let dist = self.dist(p.loc, target.loc);
 
                 if p.ptype == PieceType::Destroyer {
-                    if dist <= p.ptype.sight_range() { return true; }
+                    if dist <= if crate::models::adjacent_sub_detection() { 1 } else { p.ptype.sight_range() } { return true; }
                 } else {
                     if dist <= 1 { return true; }
                 }
