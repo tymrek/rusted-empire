@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::game::Game;
-    use crate::models::{GameMode, Terrain, City, Loc, MoveResult, Owner, Piece, PieceType, UnitActivity};
+    use crate::models::{Terrain, City, Loc, MoveResult, Owner, Piece, PieceType, UnitActivity};
 
     #[test]
     fn test_map_generation_dimensions() {
@@ -1695,41 +1695,37 @@ mod tests {
     }
 
     #[test]
-    fn test_view_state_is_not_saved_and_old_saves_with_it_are_cleaned() {
-        let mut game = Game::new(10, 10, 50);
-        game.viewport_center = Some(Loc { r: 3, c: 3 });
-        game.last_mouse_coord = Some((4, 4));
-        game.edit_cursor = Loc { r: 5, c: 5 };
-        game.msg_scroll = 9;
+    fn test_saves_hold_no_view_state_and_old_saves_with_it_still_load() {
+        let game = Game::new(10, 10, 50);
         let (path, mut v) = save_to_json(&game, "ui.sav");
-        for key in ["viewport_center", "last_mouse_coord", "edit_cursor", "msg_scroll"] {
+        for key in ["viewport_center", "last_mouse_coord", "edit_cursor", "msg_scroll", "mode", "messages_logged"] {
             assert!(v.get(key).is_none(), "{} should not be written", key);
         }
-        // a save written by an older build still contains them: they must be ignored
+        // a save written by an older build still contains view fields: they are ignored
         v["viewport_center"] = serde_json::json!({"r": 3, "c": 3});
         v["last_mouse_coord"] = serde_json::json!([4, 4]);
         v["edit_cursor"] = serde_json::json!({"r": 5, "c": 5});
         v["msg_scroll"] = serde_json::json!(9);
+        v["mode"] = serde_json::json!({"PickDest": 3});
         write_json(&path, &v);
-        let loaded = Game::load_game(path.to_str().unwrap()).unwrap();
-        assert_eq!(loaded.viewport_center, None);
-        assert_eq!(loaded.last_mouse_coord, None);
-        assert_eq!(loaded.edit_cursor, Loc { r: 0, c: 0 });
-        assert_eq!(loaded.msg_scroll, 0);
+        assert!(Game::load_game(path.to_str().unwrap()).is_ok());
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn test_modal_modes_come_back_as_manual() {
-        for mode in [GameMode::Edit, GameMode::Auto, GameMode::PickDest(3), GameMode::Manual] {
-            let mut game = Game::new(10, 10, 50);
-            game.mode = mode;
-            let path = scratch_path("mode.sav");
-            game.save_game(path.to_str().unwrap()).unwrap();
-            let loaded = Game::load_game(path.to_str().unwrap()).unwrap();
-            assert_eq!(loaded.mode, GameMode::Manual, "saved in {:?}", mode);
-            let _ = std::fs::remove_file(path);
+    fn test_new_messages_scroll_the_view_back_down() {
+        let mut game = Game::new(10, 10, 50);
+        let mut view = crate::view::View::default();
+        game.log(String::from("one"));
+        view.follow_messages(&game);
+        view.msg_scroll = 4;
+        view.follow_messages(&game);
+        assert_eq!(view.msg_scroll, 4, "nothing new: stays scrolled back");
+        for i in 0..150 {
+            game.log(format!("{}", i)); // the log is capped, the count is not
         }
+        view.follow_messages(&game);
+        assert_eq!(view.msg_scroll, 0);
     }
 
     #[test]
@@ -2649,5 +2645,81 @@ mod tests {
         assert_eq!(conts.len(), 2);
         let land_a = 9 * 11 - 3 * 4;
         assert_eq!(conts[0].value, 2000 + land_a);
+    }
+
+    // ---- the player's order commands (what the interface calls) ----
+
+    #[test]
+    fn test_global_standing_order_reaches_waiting_units_but_not_cities_with_their_own() {
+        let mut game = Game::with_seed(10, 10, 0, 1);
+        game.map = vec![vec![Terrain::Land; 10]; 10];
+        game.cities.push(city(Loc { r: 2, c: 2 }, Owner::Player));
+        game.cities.push(city(Loc { r: 7, c: 7 }, Owner::Player));
+        game.cities[1].default_orders.push((PieceType::Army, UnitActivity::Sentry));
+        game.pieces.push(test_piece(1, PieceType::Army, Owner::Player, 2, 2));
+        game.pieces.push(test_piece(2, PieceType::Army, Owner::Player, 7, 7));
+        game.pieces[0].activity = UnitActivity::Idle;
+        game.pieces[1].activity = UnitActivity::Idle;
+        let n = game.set_standing_order(crate::game::OrderScope::Global, PieceType::Army, UnitActivity::Sentry);
+        assert_eq!(n, 1, "the city with its own army order is left alone");
+        assert_eq!(game.default_orders.iter().find(|(p, _)| *p == PieceType::Army).unwrap().1, UnitActivity::Sentry);
+        assert_eq!(game.pieces[0].activity, UnitActivity::Sentry);
+        assert_eq!(game.pieces[1].activity, UnitActivity::Idle);
+    }
+
+    #[test]
+    fn test_city_standing_order_is_carried_out_at_once() {
+        let mut game = Game::with_seed(10, 10, 0, 1);
+        game.map = vec![vec![Terrain::Land; 10]; 10];
+        game.cities.push(city(Loc { r: 5, c: 5 }, Owner::Player));
+        game.pieces.push(test_piece(1, PieceType::Army, Owner::Player, 5, 5));
+        game.pieces[0].activity = UnitActivity::Idle;
+        let n = game.set_standing_order(crate::game::OrderScope::City(0), PieceType::Army, UnitActivity::Dir(0, 1));
+        assert_eq!(n, 1);
+        assert_eq!(game.cities[0].default_orders, vec![(PieceType::Army, UnitActivity::Dir(0, 1))]);
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 6 }, "it marched straight away");
+    }
+
+    #[test]
+    fn test_wake_and_launch_commands() {
+        let mut game = Game::with_seed(10, 10, 0, 1);
+        let mut t = test_piece(1, PieceType::Transport, Owner::Player, 5, 5);
+        t.cargo.push(test_piece(10, PieceType::Army, Owner::Player, 5, 5));
+        game.pieces.push(t);
+        game.pieces.push(test_piece(2, PieceType::Destroyer, Owner::Player, 5, 5));
+        game.pieces[1].activity = UnitActivity::Sentry;
+        assert_eq!(game.wake_units_at(Loc { r: 5, c: 5 }, Some(PieceType::Destroyer)), 1);
+        assert_eq!(game.pieces[0].cargo.len(), 1, "only destroyers were asked for");
+        assert!(game.launch_cargo_at(Loc { r: 5, c: 5 }));
+        assert!(game.pieces[0].cargo.is_empty());
+        assert!(!game.launch_cargo_at(Loc { r: 5, c: 5 }), "nothing left to launch");
+    }
+
+    #[test]
+    fn test_sentry_on_a_transport_goes_below_deck() {
+        let mut game = Game::with_seed(10, 10, 0, 1);
+        game.pieces.push(test_piece(1, PieceType::Transport, Owner::Player, 5, 5));
+        game.pieces.push(test_piece(2, PieceType::Army, Owner::Player, 5, 5));
+        game.sentry_unit(1);
+        assert_eq!(game.pieces.len(), 1);
+        assert_eq!(game.pieces[0].cargo.len(), 1);
+        // with nothing to board, it just stands sentry
+        game.pieces.push(test_piece(3, PieceType::Army, Owner::Player, 2, 2));
+        game.sentry_unit(1);
+        assert_eq!(game.pieces[1].activity, UnitActivity::Sentry);
+        assert_eq!(game.pieces[1].moves_left, 0);
+    }
+
+    #[test]
+    fn test_skip_and_order_unit() {
+        let mut game = Game::with_seed(10, 10, 0, 1);
+        game.pieces.push(test_piece(1, PieceType::Destroyer, Owner::Player, 5, 5));
+        game.pieces[0].activity = UnitActivity::Idle;
+        game.skip_unit(0);
+        assert_eq!(game.pieces[0].moves_left, 0);
+        game.pieces[0].moves_left = 2;
+        game.order_unit(0, UnitActivity::Dir(1, 0));
+        assert_eq!(game.pieces[0].loc, Loc { r: 7, c: 5 });
+        assert!(game.messages.last().unwrap().contains("South"), "{:?}", game.messages.last());
     }
 }

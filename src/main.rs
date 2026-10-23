@@ -1,11 +1,19 @@
+//! rs-empire: a Rust port of VMS-Empire.
+//!
+//! The game itself (`game`, `ai`, `models`) knows nothing about the screen: the terminal
+//! front end (`app`, `disp`, `keys`, `view`, `terminal`) turns keys into calls on `Game`
+//! and keeps what it is showing in a `View`. That line is where a client/server split
+//! would go.
 mod ai;
 mod app;
 mod disp;
 mod game;
 mod game_tests;
 mod headless;
+mod keys;
 mod models;
 mod terminal;
+mod view;
 
 use std::process::ExitCode;
 

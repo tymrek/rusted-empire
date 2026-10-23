@@ -1,5 +1,6 @@
 use crate::game::Game;
-use crate::models::{Terrain, GameMode, Owner, PieceType, Loc};
+use crate::models::{Terrain, Owner, PieceType, Loc};
+use crate::view::{GameMode, View};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use ratatui::{
@@ -39,11 +40,16 @@ pub fn view_axes(game: &Game, center: Loc, view_height: usize, view_width: usize
     ((start_r..end_r).collect(), (start_c..end_c).collect())
 }
 
-pub fn refresh_display_with_input(game: &Game, prompt: &str) {
-    refresh_display_with_input_blinking(game, prompt, None);
+/// Draws the whole screen: map, sidebar, message log, and `prompt` on the bottom line.
+pub fn refresh_display_with_input(game: &Game, view: &mut View, prompt: &str) {
+    refresh_display_with_input_blinking(game, view, prompt, None);
 }
 
-pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_blink: Option<(Loc, bool)>) {
+/// As `refresh_display_with_input`, with the square in `active_blink` highlighted and
+/// shown or hidden (the bool) so that it blinks between calls.
+pub fn refresh_display_with_input_blinking(game: &Game, view: &mut View, prompt: &str, active_blink: Option<(Loc, bool)>) {
+    view.follow_messages(game);
+    let view = &*view;
     let mut terminal = get_terminal();
 
     terminal.draw(|f| {
@@ -75,10 +81,10 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
         let map_area = upper_chunks[0];
         let sidebar_area = upper_chunks[1];
 
-        let center_loc = if let Some(vp) = game.viewport_center {
+        let center_loc = if let Some(vp) = view.center {
             vp
-        } else if game.mode == GameMode::Edit || matches!(game.mode, GameMode::PickDest(_)) {
-            game.edit_cursor
+        } else if view.shows_cursor() {
+            view.cursor
         } else if let Some((loc, _)) = active_blink {
             loc
         } else {
@@ -132,7 +138,7 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
             let mut spans = Vec::new();
             for &c in &col_coords {
                 let loc = Loc { r, c };
-                if game.show_comp_view {
+                if view.show_comp_view {
                     // The computer's map, as it has seen the world (after it resigns).
                     let ch = match game.comp_map[r][c] { 0 => b' ', ch => ch };
                     let color = match ch {
@@ -154,12 +160,12 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
                     continue;
                 }
 
-                if (game.mode == GameMode::Edit || matches!(game.mode, GameMode::PickDest(_))) && game.edit_cursor == loc {
+                if view.shows_cursor() && view.cursor == loc {
                     spans.push(Span::styled("█", Style::default().fg(Color::White)));
                     continue;
                 }
 
-                let is_blink_target = active_blink.map_or(false, |(b_loc, _)| b_loc == loc);
+                let is_blink_target = active_blink.is_some_and(|(b_loc, _)| b_loc == loc);
                 let is_blink_off = is_blink_target && !active_blink.unwrap().1;
 
                 let piece_opt = viewport_pieces.get(&loc).copied();
@@ -211,10 +217,10 @@ pub fn refresh_display_with_input_blinking(game: &Game, prompt: &str, active_bli
             lines.push(Line::from(spans));
         }
 
-        let map_title = if game.show_comp_view {
+        let map_title = if view.show_comp_view {
             format!(" rs Empire | Turn: {} | THE ENEMY'S MAP ", game.turn)
         } else {
-            format!(" rs Empire | Turn: {} | Mode: {:?} ", game.turn, game.mode)
+            format!(" rs Empire | Turn: {} | Mode: {:?} ", game.turn, view.mode)
         };
         let map_widget = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(map_title));
@@ -233,9 +239,9 @@ let mut sidebar_lines = vec![
             Line::from(""),
         ];
 
-        if game.mode == GameMode::Edit {
+        if view.mode == GameMode::Edit {
             sidebar_lines.push(Line::from(Span::styled("--- CURSOR INFO ---", Style::default().fg(Color::Magenta))));
-            let loc = game.edit_cursor;
+            let loc = view.cursor;
             
             if game.player_map[loc.r][loc.c] == 1 {
                 let terrain = if game.map[loc.r][loc.c] == Terrain::Land { "Land" } else { "Sea" };
@@ -302,9 +308,7 @@ let mut sidebar_lines = vec![
                 } else if piece.ptype == PieceType::Satellite {
                     sidebar_lines.push(Line::from(format!(" Orbit: {}/{} turns", piece.fuel, crate::game::SATELLITE_LIFE)));
                 }
-                if piece.ptype == PieceType::Transport || piece.ptype == PieceType::Carrier {
-                    sidebar_lines.push(Line::from(format!(" Cargo: {} units", piece.cargo.len())));
-                } else if !piece.cargo.is_empty() {
+                if piece.ptype.cargo_type().is_some() || !piece.cargo.is_empty() {
                     sidebar_lines.push(Line::from(format!(" Cargo: {} units", piece.cargo.len())));
                 }
                 sidebar_lines.push(Line::from(""));
@@ -328,7 +332,7 @@ let mut sidebar_lines = vec![
         let display_count = 5; 
         
         let max_scroll = total_msgs.saturating_sub(display_count);
-        let safe_scroll = game.msg_scroll.min(max_scroll);
+        let safe_scroll = view.msg_scroll.min(max_scroll);
         
         let start_idx = total_msgs.saturating_sub(display_count).saturating_sub(safe_scroll);
         let end_idx = (start_idx + display_count).min(total_msgs);
