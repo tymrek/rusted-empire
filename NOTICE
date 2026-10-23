@@ -1,0 +1,84 @@
+rusted-empire (rs-empire)
+A Rust port of VMS-Empire
+
+Copyright (C) 1987, 1988 Chuck Simmons
+Rust port and modifications Copyright (C) 2026 James T. Jordan <kermyt@gmail.com>
+
+This program is free software; you can redistribute it and/or modify it
+under the terms of the GNU General Public License, version 2, as
+published by the Free Software Foundation. The full text is in the file
+LICENSE.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+Public License for more details.
+
+
+WHAT THIS IS, AND WHERE IT CAME FROM
+------------------------------------
+
+rusted-empire is a modified version of VMS-Empire, rewritten in Rust with
+a ratatui terminal interface. It is a derivative work of the C sources of
+VMS-Empire (version 1.13 and earlier), which are distributed under the
+GNU General Public License, version 2. Large parts of this program are
+direct translations of that C code, in particular:
+
+  - the computer player (compmove.c and the path-finding in map.c),
+    ported to src/ai.rs;
+  - world generation, city placement and the choice of starting
+    continents and difficulty levels (game.c), ported to src/game.rs;
+  - the rules of movement, combat, city assault, production and
+    retooling, fighter fuel, satellites and the endgame (object.c,
+    attack.c, usermove.c, empire.c, data.c), reimplemented in
+    src/game.rs and src/models.rs.
+
+The terminal interface, save format, headless test rig and the
+quality-of-life changes listed in README.md are new in this port. As
+section 2(a) of the GPL asks, this file states that the program has been
+modified; README.md ("Differences from the original") and CHANGELOG.md
+describe the changes and when they were made.
+
+
+LINEAGE AND CREDITS
+-------------------
+
+Empire was originally written by Walter Bright in the 1970s, in FORTRAN
+on DEC PDP-10 systems.
+
+The game was ported to DEC's VAX/VMS from the TOPS-10/20 FORTRAN sources
+around fall 1979. Because it ran on VMS machines for so long, that
+version became known as VMS Empire.
+
+Ed James obtained the sources at Berkeley, converted parts of the code
+to C to use curses for screen handling, and published his modified
+sources in December 1986. Support for different terminal types was added
+by Craig Leres; curses support by Ed James.
+
+In early 1987 Chuck Simmons reverse engineered the program and wrote a
+version entirely in C, with new algorithms, new commands and a redesigned
+set of units. That C version is the ancestor of this port.
+  Copyright (C) 1987, 1988 Chuck Simmons
+
+Eric S. Raymond maintained the C version from around 1990 under the name
+VMS-Empire: colorization, speed tuning, the save-interval option, ANSI C
+cleanups, packaging, and the move from Chuck Simmons's modified GPL text
+to the standard GNU GPL (version 1.8, 2010).
+
+Other contributors to the C version, as credited in its documentation
+and NEWS file:
+  Michael Self        - corrected victory-odds (probability) table
+  James T. Jordan     - speedups, ANSI prototypes and code cleanup
+                        (VMS-Empire 1.2, 2000)
+  Walt Stoneburner    - compiler-warning cleanup (1.3)
+  Joe Wells           - different-sized worlds (1.8)
+  Andrew Morrow       - map function fixes (1.8)
+  Dennis Pinckard     - Mac OS X port fix (1.12)
+
+The Rust port (2026) is by James T. Jordan, the same contributor credited
+in VMS-Empire 1.2 (then <kermyt@earthling.net>, now <kermyt@gmail.com>),
+with code written in collaboration with AI assistants (Anthropic's Claude
+and Google's Gemini).
+
+A brief history of Empire: http://www.classicempire.com/history.html
+VMS-Empire: http://www.catb.org/~esr/vms-empire/
