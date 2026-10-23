@@ -42,6 +42,16 @@ pub(crate) fn geo_dist(torus: bool, rows: usize, cols: usize, a: Loc, b: Loc) ->
     dr.max(dc)
 }
 
+/// The size of the world in a normal game (the original's 60 x 100 map).
+pub const MAP_ROWS: usize = 60;
+pub const MAP_COLS: usize = 100;
+/// Squares of map per city: the original's 70 cities on a 60 x 100 map.
+const SQUARES_PER_CITY: usize = 85;
+/// How far the player can see around the starting city at the start.
+const START_SIGHT: i32 = 6;
+/// Messages kept in the log.
+const MAX_MESSAGES: usize = 100;
+
 /// A fighter's fuel when full, in moves (the original's fighter range).
 pub const FIGHTER_FUEL: i32 = 32;
 /// A satellite's life in turns: the original's range of 500 moves at 10 moves a turn.
@@ -67,6 +77,15 @@ fn fresh_rng() -> StdRng {
 /// migration step to `Game::migrate`. Saves from before versioning count as version 0.
 pub const SAVE_VERSION: u32 = 3;
 
+/// Where a standing order for new units applies (`Game::set_standing_order`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderScope {
+    /// Every player city without its own order for that unit type.
+    Global,
+    /// One city (an index into `Game::cities`).
+    City(usize),
+}
+
 /// A continent a side may start on (the original's `cont_t`): its value and its cities
 /// (indices into `Game::cities`).
 #[derive(Clone, Debug)]
@@ -84,7 +103,6 @@ pub struct Game {
     pub cols: usize,
     pub turn: i32,
     pub difficulty: u32,
-    pub mode: GameMode,
     pub map: Vec<Vec<Terrain>>,
     /// The computer's view of the world, as in the original: what its units and cities
     /// have seen, as map characters (see `ai.rs`); 0 or `' '` is unexplored.
@@ -104,31 +122,23 @@ pub struct Game {
     #[serde(skip)]
     pub fighter_stats: [FighterStats; 2],
     /// The computer has acknowledged defeat and the player chose to fight on (the
-    /// original's `resigned`). Its map can then be examined (`show_comp_view`).
+    /// original's `resigned`). Its map can then be examined (`View::show_comp_view`).
     #[serde(default)]
     pub comp_resigned: bool,
-    /// Show the computer's view of the world instead of the player's (only offered once
-    /// the computer has resigned).
-    #[serde(skip)]
-    pub show_comp_view: bool,
     /// Debug observer mode (`~`): the player sees everything, live.
     #[serde(skip)]
     pub omniscient: bool,
     pub cities: Vec<City>,
     pub pieces: Vec<Piece>,
     pub messages: Vec<String>,
+    /// How many messages have ever been logged (the log itself keeps only the last
+    /// `MAX_MESSAGES`): lets a view notice new ones. Not saved.
     #[serde(skip)]
-    pub msg_scroll: usize,          
-    pub pending_cities: Vec<usize>, 
+    pub messages_logged: u64,
+    pub pending_cities: Vec<usize>,
     pub player_score: u32,
     pub comp_score: u32,
-    #[serde(skip)]
-    pub edit_cursor: Loc,
     pub default_orders: Vec<(PieceType, UnitActivity)>,
-    #[serde(skip)]
-    pub viewport_center: Option<Loc>,
-    #[serde(skip)]
-    pub last_mouse_coord: Option<(u16, u16)>,
     /// Next piece id to hand out. Ids are never reused, even after a piece dies
     /// or while it is riding in a transport's cargo hold.
     #[serde(default)]
@@ -159,26 +169,21 @@ impl Game {
             cols,
             turn: 1,
             difficulty,
-            mode: GameMode::Manual,
             map,
             comp_map,
             player_map,
             player_view,
             omniscient: false,
             comp_resigned: false,
-            show_comp_view: false,
             fighter_stats: [FighterStats::default(); 2],
             comp_new_cities: Vec::new(),
             cities: Vec::new(),
             pieces: Vec::new(),
             messages: Vec::new(),
-            msg_scroll: 0,
+            messages_logged: 0,
             pending_cities: Vec::new(),
             player_score: 0,
             comp_score: 0,
-            edit_cursor: Loc { r: 0, c: 0 },
-            viewport_center: None,
-            last_mouse_coord: None,
             next_id: 1,
             rng: fresh_rng(),
             moved_this_turn: std::collections::HashSet::new(),
@@ -262,7 +267,7 @@ impl Game {
         }
 
         // Leave enough land for every city, then find the height at which we have enough water.
-        let num_city = size / 85;
+        let num_city = size / SQUARES_PER_CITY;
         let mut target_water = playable * WATER_RATIO / 100;
         if target_water > playable.saturating_sub(num_city) {
             target_water = playable.saturating_sub(num_city);
@@ -466,9 +471,8 @@ impl Game {
             }
         }
         for c in &self.cities {
-            if c.owner == viewer {
-                if self.dist(c.loc, target.loc) <= 1 { return true; }
-            }
+            if c.owner == viewer
+                && self.dist(c.loc, target.loc) <= 1 { return true; }
         }
         false
     }
@@ -605,7 +609,7 @@ impl Game {
                 .flat_map(|r| (1..self.cols - 1).map(move |c| Loc { r, c }))
                 .filter(|&l| self.map[l.r][l.c] == Terrain::Land)
                 .collect();
-            let target_cities = (self.rows * self.cols) / 85;
+            let target_cities = (self.rows * self.cols) / SQUARES_PER_CITY;
             for loc in self.place_cities(&land_tiles, target_cities) {
                 self.cities.push(City {
                     loc, owner: Owner::Neutral, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
@@ -722,7 +726,7 @@ impl Game {
             .flat_map(|i| (0..n).map(move |j| (i, j)))
             .map(|(i, j)| (conts[i].value - conts[j].value, i, j))
             .collect();
-        pairs.sort_by(|a, b| b.0.cmp(&a.0)); // stable: ties keep their order
+        pairs.sort_by_key(|p| std::cmp::Reverse(p.0)); // stable: ties keep their order
         pairs.into_iter().map(|(_, i, j)| (i, j)).collect()
     }
 
@@ -760,7 +764,7 @@ impl Game {
         self.cities[user_city].owner = Owner::Player;
         self.cities[user_city].work = 0;
         let loc = self.cities[user_city].loc;
-        self.reveal_vision(loc, 6);
+        self.reveal_vision(loc, START_SIGHT);
 
         self.log(format!("Classic VMS-Empire map generated. Difficulty level {}.", level));
         self.log(format!("Game initialized. {} cities scattered across the world.", self.cities.len()));
@@ -857,6 +861,7 @@ impl Game {
     /// is lost whatever happens (after winning any fight there):
     /// - a ship that goes ashore breaks up on shore;
     /// - an army that walks into the sea, or onto a transport that is full, drowns.
+    ///
     /// Cities are handled separately (`is_fatal_city_entry`, `assault_city`).
     pub fn is_suicidal_terrain_entry(&self, ptype: PieceType, owner: Owner, loc: Loc) -> bool {
         self.is_suicidal_entry_for(ptype, owner, loc, None)
@@ -930,7 +935,7 @@ impl Game {
                 if same_plane_only && (ptype == PieceType::Fighter) != (attacker == PieceType::Fighter) {
                     continue;
                 }
-                if best.map_or(true, |b| original_rank(ptype) > original_rank(self.pieces[b].ptype)) {
+                if !matches!(best, Some(b) if original_rank(ptype) <= original_rank(self.pieces[b].ptype)) {
                     best = Some(i);
                 }
             }
@@ -1311,8 +1316,8 @@ impl Game {
                 for &dir in &dirs {
                     let (target_r, target_c, target_in_map) = match self.step(loc, dir) { Some(l) => (l.r, l.c, true), None => (0, 0, false) };
 
-                    if target_in_map {
-                        if !visited[target_r][target_c] {
+                    if target_in_map
+                        && !visited[target_r][target_c] {
                             let is_land = self.map[target_r][target_c] == Terrain::Land;
                             let can_enter = match ptype {
                                 PieceType::Army => is_land,
@@ -1320,15 +1325,12 @@ impl Game {
                                 _ => !is_land,
                             };
 
-                            if can_enter {
-                                visited[target_r][target_c] = true;
-                                queue.push_back((Loc { r: target_r, c: target_c }, initial_step));
-                            } else if self.player_map[target_r][target_c] == 0 {
+                            // unexplored squares are searched too: they might be passable
+                            if can_enter || self.player_map[target_r][target_c] == 0 {
                                 visited[target_r][target_c] = true;
                                 queue.push_back((Loc { r: target_r, c: target_c }, initial_step));
                             }
                         }
-                    }
                 }
             }
             if !found_fog {
@@ -1710,8 +1712,8 @@ impl Game {
                 for &dir in &dirs {
                     let (target_r, target_c, target_in_map) = match self.step(loc, dir) { Some(l) => (l.r, l.c, true), None => (0, 0, false) };
 
-                    if target_in_map {
-                        if !visited[target_r][target_c] {
+                    if target_in_map
+                        && !visited[target_r][target_c] {
                             let is_land = self.map[target_r][target_c] == Terrain::Land;
                             let can_enter = match p.ptype {
                                 PieceType::Army => is_land,
@@ -1725,7 +1727,6 @@ impl Game {
                                 queue.push_back((Loc { r: target_r, c: target_c }, initial_step));
                             }
                         }
-                    }
                 }
             }
 
@@ -1858,12 +1859,11 @@ impl Game {
                         _ => !is_land || friendly_city,
                     };
 
-                    if can_enter || ptype.flies() {
-                        if ((!friendly_city && !self.is_tile_blocked_by_friend(step_loc, ptype, Owner::Player)) || step_loc == target_loc)
+                    if (can_enter || ptype.flies())
+                        && ((!friendly_city && !self.is_tile_blocked_by_friend(step_loc, ptype, Owner::Player)) || step_loc == target_loc)
                             && !self.is_fatal_city_entry(ptype, Owner::Player, step_loc) {
                             valid_steps.push(step_loc);
                         }
-                    }
                 }
             }
 
@@ -2144,8 +2144,8 @@ impl Game {
 
     pub fn log(&mut self, msg: String) {
         self.messages.push(msg);
-        self.msg_scroll = 0; 
-        if self.messages.len() > 100 { 
+        self.messages_logged += 1;
+        if self.messages.len() > MAX_MESSAGES {
             self.messages.remove(0);
         }
     }
@@ -2224,12 +2224,10 @@ impl Game {
         for (i, other) in self.pieces.iter().enumerate() {
             if other.owner == Owner::Player && other.ptype == PieceType::Transport
                 && self.has_room_for(other, Some(self.pieces[piece_idx].id))
-            {
-                if self.dist(loc, other.loc) <= 1 {
+                && self.dist(loc, other.loc) <= 1 {
                     target_transport = Some(i);
                     break;
                 }
-            }
         }
 
         if let Some(t_idx) = target_transport {
@@ -2243,6 +2241,174 @@ impl Game {
             return true;
         }
         false
+    }
+
+    // ------------------------------------------------------------------------------
+    // Orders the player gives. The interface turns keys into these calls; nothing here
+    // knows about the screen, so the same calls can serve any front end.
+    // ------------------------------------------------------------------------------
+
+    /// Carries out the standing order the unit at `idx` has just been given, straight
+    /// away (orders that only take effect at the next turn do nothing here).
+    pub fn carry_out_order(&mut self, idx: usize) {
+        match self.pieces[idx].activity {
+            UnitActivity::Explore => self.explore_piece(idx),
+            UnitActivity::Attack => self.attack_piece(idx),
+            UnitActivity::Random => self.random_piece(idx),
+            UnitActivity::Dest(_) => self.dest_piece(idx),
+            UnitActivity::Dir(_, _) => self.dir_piece(idx),
+            UnitActivity::Fill => self.process_fill_mode(idx),
+            UnitActivity::Upgrade => self.process_upgrade_mode(idx),
+            UnitActivity::Land => self.process_land_mode(idx),
+            _ => {}
+        }
+    }
+
+    /// Gives the player's unit at `idx` a standing order and carries it out at once (the
+    /// unit-by-unit orders). Sentry and wake have their own calls (`sentry_unit`,
+    /// `wake_unit`). Dead pieces are cleared out afterwards, so indices may change.
+    pub fn order_unit(&mut self, idx: usize, act: UnitActivity) {
+        let ptype = self.pieces[idx].ptype;
+        self.pieces[idx].activity = act;
+        let msg = match act {
+            UnitActivity::Attack => format!("{:?} set to attack mode.", ptype),
+            UnitActivity::Explore => format!("{:?} set to grope/explore mode.", ptype),
+            UnitActivity::Dest(to) => format!("{:?} ordered to march toward ({},{}).", ptype, to.r, to.c),
+            UnitActivity::Dir(dr, dc) => format!("{:?} ordered to march continuously {}.", ptype, dir_name((dr, dc))),
+            UnitActivity::TransportWait => String::from("Unit set to Transport Wait."),
+            other => format!("Unit set to {:?}.", other),
+        };
+        self.log(msg);
+        self.carry_out_order(idx);
+        self.pieces.retain(|p| p.hits > 0);
+    }
+
+    /// Ends the unit's move for this turn without orders.
+    pub fn skip_unit(&mut self, idx: usize) {
+        let p = &mut self.pieces[idx];
+        p.moves_left = 0;
+        let msg = format!("{:?} at ({},{}) skipped turn.", p.ptype, p.loc.r, p.loc.c);
+        self.log(msg);
+    }
+
+    /// Puts the unit on sentry duty for the rest of this turn and after. An army on a
+    /// transport (or a fighter over a carrier) with room goes below deck into the hold
+    /// instead. Dead pieces may be cleared out afterwards, so indices may change.
+    pub fn sentry_unit(&mut self, idx: usize) {
+        let (ptype, loc, id) = (self.pieces[idx].ptype, self.pieces[idx].loc, self.pieces[idx].id);
+        self.pieces[idx].moves_left = 0;
+        let ship_with_room = self.pieces.iter().any(|p| {
+            p.loc == loc && p.owner == Owner::Player && p.ptype.cargo_type() == Some(ptype) && self.has_room_for(p, Some(id))
+        });
+        if ship_with_room {
+            let (res, msg) = self.attempt_move(idx, loc);
+            if res == MoveResult::Moved && msg.contains("boarded") {
+                self.log(msg);
+                self.pieces.retain(|p| p.hits > 0);
+                return;
+            }
+        }
+        self.pieces[idx].activity = UnitActivity::Sentry;
+        self.log(format!("{:?}({}:{}) put on sentry duty.", ptype, loc.r, loc.c));
+    }
+
+    /// Wakes the unit (clears its standing order); a transport or carrier also brings
+    /// its cargo up on deck.
+    pub fn wake_unit(&mut self, idx: usize) {
+        let ptype = self.pieces[idx].ptype;
+        self.pieces[idx].activity = UnitActivity::Idle;
+        self.log(format!("{:?} woken up.", ptype));
+        if ptype.cargo_type().is_some() {
+            self.wake_cargo(idx);
+        }
+    }
+
+    /// Wakes the player's units at `loc` (of type `only`, or all of them), and brings up
+    /// the cargo of any transport or carrier among them. Returns how many were woken.
+    pub fn wake_units_at(&mut self, loc: Loc, only: Option<PieceType>) -> usize {
+        let mut woke = 0;
+        let mut carriers = Vec::new();
+        for (i, p) in self.pieces.iter_mut().enumerate() {
+            if p.loc == loc && p.owner == Owner::Player && p.hits > 0 && p.ptype != PieceType::Satellite
+                && !matches!(only, Some(t) if t != p.ptype)
+            {
+                if p.activity != UnitActivity::Idle {
+                    p.activity = UnitActivity::Idle;
+                    woke += 1;
+                }
+                if !p.cargo.is_empty() {
+                    carriers.push(i);
+                }
+            }
+        }
+        for i in carriers {
+            self.wake_cargo(i);
+        }
+        woke
+    }
+
+    /// Brings up the cargo of every player transport or carrier at `loc`. False if there
+    /// was none.
+    pub fn launch_cargo_at(&mut self, loc: Loc) -> bool {
+        let carriers: Vec<usize> = (0..self.pieces.len())
+            .filter(|&i| {
+                let p = &self.pieces[i];
+                p.loc == loc && p.owner == Owner::Player && p.hits > 0 && !p.cargo.is_empty()
+            })
+            .collect();
+        for &i in &carriers {
+            self.wake_cargo(i);
+        }
+        !carriers.is_empty()
+    }
+
+    /// Sets the standing order new units of type `ptype` get (globally, or in one city),
+    /// and gives it to units of that type already waiting in the cities concerned, which
+    /// carry it out at once. A city's own order overrides the global one, so a global
+    /// change leaves cities with their own order for that type alone. Returns how many
+    /// units took the new order.
+    pub fn set_standing_order(&mut self, scope: OrderScope, ptype: PieceType, act: UnitActivity) -> usize {
+        fn set(orders: &mut Vec<(PieceType, UnitActivity)>, ptype: PieceType, act: UnitActivity) {
+            match orders.iter_mut().find(|(p, _)| *p == ptype) {
+                Some(entry) => entry.1 = act,
+                None => orders.push((ptype, act)),
+            }
+        }
+        let city_locs: Vec<Loc> = match scope {
+            OrderScope::Global => {
+                set(&mut self.default_orders, ptype, act);
+                self.cities.iter()
+                    .filter(|c| c.owner == Owner::Player && !c.default_orders.iter().any(|(p, _)| *p == ptype))
+                    .map(|c| c.loc)
+                    .collect()
+            }
+            OrderScope::City(c) => {
+                set(&mut self.cities[c].default_orders, ptype, act);
+                vec![self.cities[c].loc]
+            }
+        };
+        let mut updated = Vec::new();
+        for (i, p) in self.pieces.iter_mut().enumerate() {
+            let waiting = matches!(p.activity, UnitActivity::Idle | UnitActivity::Explore | UnitActivity::Attack
+                | UnitActivity::Random | UnitActivity::Dir(_, _) | UnitActivity::Dest(_));
+            if city_locs.contains(&p.loc) && p.owner == Owner::Player && p.ptype == ptype && p.hits > 0 && waiting {
+                p.activity = act;
+                updated.push(i);
+            }
+        }
+        let msg = match scope {
+            OrderScope::Global => format!("GLOBAL default order for {:?} set to {:?} (Applied to {} units).", ptype, act, updated.len()),
+            OrderScope::City(c) => {
+                let l = self.cities[c].loc;
+                format!("LOCAL City({},{}) order for {:?} set to {:?} (Applied to {} stacked units).", l.r, l.c, ptype, act, updated.len())
+            }
+        };
+        self.log(msg);
+        for &i in &updated {
+            self.carry_out_order(i);
+        }
+        self.pieces.retain(|p| p.hits > 0);
+        updated.len()
     }
 
     pub fn wake_cargo(&mut self, piece_idx: usize) {
@@ -2403,9 +2569,8 @@ impl Game {
     }
 
     /// Loads a save, or says why it can't: unreadable, not a save, from a newer build, or
-    /// internally inconsistent. View-only state (viewport, mouse drag, edit cursor, message
-    /// scroll) is never stored in saves, and a game that was saved mid-edit, mid-automove
-    /// or mid-destination-pick comes back in plain manual mode.
+    /// internally inconsistent. Saves hold only the game, never what the screen was
+    /// showing (see `View`); old saves that still carry view fields load fine.
     pub fn load_game(filename: &str) -> Result<Self, String> {
         let data = std::fs::read_to_string(filename)
             .map_err(|e| format!("could not read {}: {}", filename, e))?;
@@ -2419,7 +2584,6 @@ impl Game {
         }
         game.migrate();
         game.validate().map_err(|e| format!("{} is damaged: {}", filename, e))?;
-        game.mode = GameMode::Manual;
         Ok(game)
     }
 

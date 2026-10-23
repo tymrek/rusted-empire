@@ -46,14 +46,6 @@ pub enum Owner {
     Neutral,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GameMode {
-    Manual,
-    Auto,
-    Edit,
-    PickDest(usize),
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PieceType {
     Army,
@@ -260,5 +252,20 @@ impl std::ops::AddAssign for FighterStats {
         self.shot_down += o.shot_down;
         self.lost_over_city += o.lost_over_city;
         self.lost_with_carrier += o.lost_with_carrier;
+    }
+}
+
+/// A direction's name for messages (a (row, column) step).
+pub fn dir_name(dir: (i32, i32)) -> &'static str {
+    match dir {
+        (-1, 0) => "North",
+        (1, 0) => "South",
+        (0, -1) => "West",
+        (0, 1) => "East",
+        (-1, -1) => "NW",
+        (-1, 1) => "NE",
+        (1, -1) => "SW",
+        (1, 1) => "SE",
+        _ => "Unknown",
     }
 }

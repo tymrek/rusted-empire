@@ -355,7 +355,7 @@ impl Game {
     /// is ready (then reconsider production), and move ship building off lakes.
     fn do_cities(&mut self, ctx: &Ctx) {
         for c in self.comp_new_cities.clone() {
-            if self.cities.get(c).map_or(false, |city| city.owner == Owner::Comp) {
+            if self.cities.get(c).is_some_and(|city| city.owner == Owner::Comp) {
                 let is_lake = self.lake(ctx, c);
                 self.comp_prod(ctx, c, is_lake, true);
             }
@@ -392,13 +392,14 @@ impl Game {
     /// 1. have enough army producers on each continent to deal with any threat there,
     /// 2. always have a transport producer,
     /// 3. otherwise keep a good ratio of producers of each type.
+    ///
     /// `new_city` means the city has no production yet (just won).
     fn comp_prod(&mut self, ctx: &Ctx, c: usize, is_lake: bool, new_city: bool) {
         let ctx_view = self.comp_view_flat();
         let geo = ctx;
         let start = geo.idx(self.cities[c].loc);
-        let cont = vmap_cont(&geo, &ctx_view, start, SEA);
-        let counts = cont_scan(&geo, &cont, &ctx_view, self);
+        let cont = vmap_cont(geo, &ctx_view, start, SEA);
+        let counts = cont_scan(geo, &cont, &ctx_view, self);
 
         // army producers on this continent
         let mut comp_ac = 0;
@@ -686,7 +687,7 @@ impl Game {
                     && game.has_room_for(p, Some(id))
                 {
                     let count = game.tt_count(t);
-                    if best.map_or(true, |(_, bc)| count >= bc) {
+                    if !matches!(*best, Some((_, bc)) if count < bc) {
                         *best = Some((t, count));
                     }
                 }
@@ -722,11 +723,10 @@ impl Game {
             }
         }
         for city in &self.cities {
-            if city.owner == Owner::Comp && city.prod == PieceType::Transport {
-                if self.nearby_load(i, city.loc) || self.nearby_count(city.loc) < PieceType::Transport.capacity_for_hits(1) {
+            if city.owner == Owner::Comp && city.prod == PieceType::Transport
+                && (self.nearby_load(i, city.loc) || self.nearby_count(city.loc) < PieceType::Transport.capacity_for_hits(1)) {
                     xmap[geo.idx(city.loc)] = b'x';
                 }
-            }
         }
         xmap
     }
