@@ -35,30 +35,27 @@ const SEA: u8 = b'.';
 
 /// What a unit is looking for: the objective characters and their weights (`move_info_t`).
 struct MoveInfo {
-    city_owner: Owner,
     objectives: &'static [u8],
     weights: &'static [i32],
 }
 
-const TT_EXPLORE: MoveInfo = MoveInfo { city_owner: Owner::Comp, objectives: b" ", weights: &[1] };
-const TT_LOAD: MoveInfo = MoveInfo { city_owner: Owner::Comp, objectives: b"$", weights: &[1] };
+const TT_EXPLORE: MoveInfo = MoveInfo { objectives: b" ", weights: &[1] };
+const TT_LOAD: MoveInfo = MoveInfo { objectives: b"$", weights: &[1] };
 /// Unloading transports prefer cities on continents with many cities (the digits are set
 /// by `make_unload_map`), and will explore if nothing better is near.
 const TT_UNLOAD: MoveInfo = MoveInfo {
-    city_owner: Owner::Comp,
     objectives: b"9876543210 ",
     weights: &[1, 1, 1, 1, 1, 1, 11, 21, 41, 101, 61],
 };
-const ARMY_FIGHT: MoveInfo = MoveInfo { city_owner: Owner::Comp, objectives: b"O*TA ", weights: &[1, 1, 1, 1, 11] };
+const ARMY_FIGHT: MoveInfo = MoveInfo { objectives: b"O*TA ", weights: &[1, 1, 1, 1, 11] };
 /// '$' a loading transport, 'x' a city building one.
-const ARMY_LOAD: MoveInfo = MoveInfo { city_owner: Owner::Comp, objectives: b"$x", weights: &[1, W_TT_BUILD] };
+const ARMY_LOAD: MoveInfo = MoveInfo { objectives: b"$x", weights: &[1, W_TT_BUILD] };
 const FIGHTER_FIGHT: MoveInfo = MoveInfo {
-    city_owner: Owner::Comp,
     objectives: b"TCFBSDPA ",
     weights: &[1, 1, 5, 5, 5, 5, 5, 5, 9],
 };
-const SHIP_FIGHT: MoveInfo = MoveInfo { city_owner: Owner::Comp, objectives: b"TCBSDP ", weights: &[1, 1, 3, 3, 3, 3, 21] };
-const SHIP_REPAIR: MoveInfo = MoveInfo { city_owner: Owner::Comp, objectives: b"X", weights: &[1] };
+const SHIP_FIGHT: MoveInfo = MoveInfo { objectives: b"TCBSDP ", weights: &[1, 1, 3, 3, 3, 3, 21] };
+const SHIP_REPAIR: MoveInfo = MoveInfo { objectives: b"X", weights: &[1] };
 
 /// What each kind of unit attacks when it is next to it, most valuable first.
 const TT_ATTACK: &[u8] = b"T";
@@ -94,9 +91,11 @@ const DIRS: [(i32, i32); 8] = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1)
 /// The order `vmap_find_dir` tries them in: diagonals first.
 const FIND_DIR_ORDER: [usize; 8] = [7, 1, 5, 3, 6, 2, 0, 4];
 
-/// The map character for a unit (upper case: the player's).
-pub fn unit_char(ptype: PieceType, owner: Owner) -> u8 {
-    Game::unit_char(ptype, owner)
+/// The map character for a unit as side `me` sees it: its own lower case, the enemy's
+/// upper case (for the computer, the same as the player's view: player units upper case).
+fn side_char(ptype: PieceType, owner: Owner, me: Owner) -> u8 {
+    let ch = Game::unit_char(ptype, Owner::Player); // upper case
+    if owner == me { ch.to_ascii_lowercase() } else { ch }
 }
 
 /// Things counted on a continent (`scan_counts_t`, only the fields the AI uses).
@@ -125,6 +124,8 @@ struct PathMap {
 
 /// Everything the computer works from during one move.
 struct Ctx {
+    /// The side being moved.
+    me: Owner,
     rows: usize,
     cols: usize,
     torus: bool,
@@ -197,23 +198,49 @@ impl Game {
     // ------------------------------------------------------------------------------
 
     /// What the computer's view map shows at `l` (0 in an old save counts as unexplored).
-    fn cview(&self, l: Loc) -> u8 {
-        match self.comp_map[l.r][l.c] {
-            0 => UNEXPLORED,
-            ch => ch,
+    /// The view map `me` plays from: the computer's own `comp_map`, or for a player side
+    /// run by the AI (`--headless`), `player_ai_map`.
+    fn ai_map(&self, me: Owner) -> &Vec<Vec<u8>> {
+        if me == Owner::Comp { &self.comp_map } else { &self.player_ai_map }
+    }
+
+    fn ai_map_mut(&mut self, me: Owner) -> &mut Vec<Vec<u8>> {
+        if me == Owner::Comp {
+            &mut self.comp_map
+        } else {
+            if self.player_ai_map.len() != self.rows {
+                self.player_ai_map = vec![vec![0; self.cols]; self.rows];
+            }
+            &mut self.player_ai_map
         }
+    }
+
+    /// What `me`'s view map shows at `l` (0, as in an old save, counts as unexplored).
+    fn cview(&self, me: Owner, l: Loc) -> u8 {
+        match self.ai_map(me).get(l.r).and_then(|row| row.get(l.c)) {
+            None | Some(0) => UNEXPLORED,
+            Some(&ch) => ch,
+        }
+    }
+
+    /// Cities `me` has won since its last move and must still choose production for (the
+    /// player's are the ones waiting for the production prompt).
+    fn new_cities_mut(&mut self, me: Owner) -> &mut Vec<usize> {
+        if me == Owner::Comp { &mut self.comp_new_cities } else { &mut self.pending_cities }
     }
 
     /// The computer looks at every square within `range` of `loc`.
     #[allow(dead_code)] // used by the tests
     pub fn comp_scan(&mut self, loc: Loc, range: i32) {
-        self.comp_scan_many(&[(loc, range)]);
+        self.ai_scan_many(Owner::Comp, &[(loc, range)]);
     }
 
     /// The computer looks at the squares around each (centre, range) (the original's
     /// `scan`/`update`): a city shows as its owner's city character; otherwise the most
-    /// important unit there (players' submarines only if detected); otherwise the terrain.
-    fn comp_scan_many(&mut self, centers: &[(Loc, i32)]) {
+    /// important unit there (enemy submarines only if detected); otherwise the terrain.
+    /// The characters are from `me`'s side: its own units lower case and its cities 'X',
+    /// the enemy's upper case and 'O'.
+    fn ai_scan_many(&mut self, me: Owner, centers: &[(Loc, i32)]) {
         // In view: 0 = no, 1 = yes; then the best (rank + 1, char) of a unit seen there.
         let cols = self.cols;
         let mut seen = vec![false; self.rows * cols];
@@ -237,55 +264,68 @@ impl Game {
             if p.hits <= 0 || !seen[k] {
                 continue;
             }
-            if p.owner != Owner::Comp && p.ptype == PieceType::Submarine && !self.is_visible_to(i, Owner::Comp) {
+            if p.owner != me && p.ptype == PieceType::Submarine && !self.is_visible_to(i, me) {
                 continue;
             }
             let rank = if p.ptype == PieceType::Satellite { 1 } else { 2 + oidx(p.ptype) as u8 };
             if rank > top[k].0 {
-                top[k] = (rank, unit_char(p.ptype, p.owner));
+                top[k] = (rank, side_char(p.ptype, p.owner, me));
             }
         }
-        for l in cells {
-            let k = l.r * cols + l.c;
-            self.comp_map[l.r][l.c] = match top[k] {
-                (0, _) if self.map[l.r][l.c] == Terrain::Land => LAND,
-                (0, _) => SEA,
-                (_, ch) => ch,
-            };
-        }
+        let mut updates: Vec<(Loc, u8)> = cells.iter()
+            .map(|&l| {
+                let ch = match top[l.r * cols + l.c] {
+                    (0, _) if self.map[l.r][l.c] == Terrain::Land => LAND,
+                    (0, _) => SEA,
+                    (_, ch) => ch,
+                };
+                (l, ch)
+            })
+            .collect();
         for city in &self.cities {
             if seen[city.loc.r * cols + city.loc.c] {
-                self.comp_map[city.loc.r][city.loc.c] = match city.owner {
+                let ch = match city.owner {
                     Owner::Neutral => b'*',
-                    Owner::Player => b'O',
-                    Owner::Comp => b'X',
+                    o if o == me => b'X',
+                    _ => b'O',
                 };
+                updates.push((city.loc, ch));
             }
+        }
+        let map = self.ai_map_mut(me);
+        for (l, ch) in updates {
+            map[l.r][l.c] = ch;
         }
     }
 
     /// Refreshes the computer's view around all its units and cities.
+    #[allow(dead_code)] // used by the tests
     pub fn comp_scan_all(&mut self) {
-        let centers: Vec<(Loc, i32)> = self.pieces.iter()
-            .filter(|p| p.owner == Owner::Comp && p.hits > 0)
-            .map(|p| (p.loc, p.ptype.sight_range()))
-            .chain(self.cities.iter().filter(|c| c.owner == Owner::Comp).map(|c| (c.loc, Game::CITY_SIGHT)))
-            .collect();
-        self.comp_scan_many(&centers);
+        self.ai_scan_all(Owner::Comp);
     }
 
-    /// The computer's view as a flat array (row-major), for path-finding.
-    fn comp_view_flat(&self) -> Vec<u8> {
+    /// Refreshes `me`'s view around all its units and cities.
+    fn ai_scan_all(&mut self, me: Owner) {
+        let centers: Vec<(Loc, i32)> = self.pieces.iter()
+            .filter(|p| p.owner == me && p.hits > 0)
+            .map(|p| (p.loc, p.ptype.sight_range()))
+            .chain(self.cities.iter().filter(|c| c.owner == me).map(|c| (c.loc, Game::CITY_SIGHT)))
+            .collect();
+        self.ai_scan_many(me, &centers);
+    }
+
+    /// `me`'s view as a flat array (row-major), for path-finding.
+    fn view_flat(&self, me: Owner) -> Vec<u8> {
         let mut v = Vec::with_capacity(self.rows * self.cols);
         for r in 0..self.rows {
             for c in 0..self.cols {
-                v.push(self.cview(Loc { r, c }));
+                v.push(self.cview(me, Loc { r, c }));
             }
         }
         v
     }
 
-    fn make_ctx(&self) -> Ctx {
+    fn make_ctx(&self, me: Owner) -> Ctx {
         let mut rmap = vec![SEA; self.rows * self.cols];
         for r in 0..self.rows {
             for c in 0..self.cols {
@@ -297,8 +337,8 @@ impl Game {
         for city in &self.cities {
             rmap[city.loc.r * self.cols + city.loc.c] = b'*';
         }
-        let mut ctx = Ctx { rows: self.rows, cols: self.cols, torus: self.torus, rmap, emap: Vec::new(), unload_map: None, city_at: self.city_grid(), nbr: neighbour_table(self.rows, self.cols, self.torus) };
-        let mut emap = self.comp_view_flat();
+        let mut ctx = Ctx { me, rows: self.rows, cols: self.cols, torus: self.torus, rmap, emap: Vec::new(), unload_map: None, city_at: self.city_grid(), nbr: neighbour_table(self.rows, self.cols, self.torus) };
+        let mut emap = self.view_flat(me);
         prune_explore_locs(&ctx, &mut emap);
         ctx.emap = emap;
         ctx
@@ -310,11 +350,17 @@ impl Game {
 
     /// The computer's whole move (`comp_move`): look around, set production, move units.
     pub fn comp_move(&mut self) {
+        self.ai_move(Owner::Comp);
+    }
+
+    /// A whole move by the AI for side `me` (the computer, or in `--headless` games the
+    /// player side too): look around, set production, move units.
+    pub fn ai_move(&mut self, me: Owner) {
         // Armies riding in a transport's hold at sea come up on deck, so they can act
         // (attack, or walk ashore) like the original's embarked armies.
         for t in 0..self.pieces.len() {
             let p = &self.pieces[t];
-            if p.owner == Owner::Comp && p.hits > 0 && p.ptype == PieceType::Transport
+            if p.owner == me && p.hits > 0 && p.ptype == PieceType::Transport
                 && !p.cargo.is_empty() && !self.cities.iter().any(|c| c.loc == p.loc)
             {
                 let loc = p.loc;
@@ -327,8 +373,8 @@ impl Game {
             }
         }
 
-        self.comp_scan_all();
-        let mut ctx = self.make_ctx();
+        self.ai_scan_all(me);
+        let mut ctx = self.make_ctx(me);
         self.do_cities(&ctx);
         // Production may have changed what is building; the unload map is built lazily.
         ctx.unload_map = None;
@@ -339,7 +385,7 @@ impl Game {
         ];
         for ptype in MOVE_ORDER {
             let ids: Vec<usize> = self.pieces.iter()
-                .filter(|p| p.owner == Owner::Comp && p.hits > 0 && p.ptype == ptype)
+                .filter(|p| p.owner == me && p.hits > 0 && p.ptype == ptype)
                 .map(|p| p.id)
                 .collect();
             for id in ids {
@@ -354,15 +400,16 @@ impl Game {
     /// City production (`do_cities`): choose production for newly won cities, build what
     /// is ready (then reconsider production), and move ship building off lakes.
     fn do_cities(&mut self, ctx: &Ctx) {
-        for c in self.comp_new_cities.clone() {
-            if self.cities.get(c).is_some_and(|city| city.owner == Owner::Comp) {
+        let me = ctx.me;
+        for c in self.new_cities_mut(me).clone() {
+            if self.cities.get(c).is_some_and(|city| city.owner == me) {
                 let is_lake = self.lake(ctx, c);
                 self.comp_prod(ctx, c, is_lake, true);
             }
-            self.comp_new_cities.retain(|&x| x != c);
+            self.new_cities_mut(me).retain(|&x| x != c);
         }
         for c in 0..self.cities.len() {
-            if self.cities[c].owner != Owner::Comp {
+            if self.cities[c].owner != me {
                 continue;
             }
             let is_lake = self.lake(ctx, c);
@@ -395,7 +442,9 @@ impl Game {
     ///
     /// `new_city` means the city has no production yet (just won).
     fn comp_prod(&mut self, ctx: &Ctx, c: usize, is_lake: bool, new_city: bool) {
-        let ctx_view = self.comp_view_flat();
+        let me = ctx.me;
+        let ctx_view = self.view_flat(me);
+        let pending = self.new_cities_mut(me).clone();
         let geo = ctx;
         let start = geo.idx(self.cities[c].loc);
         let cont = vmap_cont(geo, &ctx_view, start, SEA);
@@ -407,8 +456,8 @@ impl Game {
             if on && ctx_view[i] == b'X' {
                 let l = geo.loc(i);
                 if let Some(city) = self.cities.iter().position(|ct| ct.loc == l) {
-                    if self.cities[city].owner == Owner::Comp && self.cities[city].prod == PieceType::Army
-                        && !(city == c && new_city) && !self.comp_new_cities.contains(&city)
+                    if self.cities[city].owner == me && self.cities[city].prod == PieceType::Army
+                        && !(city == c && new_city) && !pending.contains(&city)
                     {
                         comp_ac += 1;
                     }
@@ -437,7 +486,7 @@ impl Game {
         let mut city_count = [0i64; 9];
         let mut total_cities = 0;
         for (i, city) in self.cities.iter().enumerate() {
-            if city.owner == Owner::Comp && !(i == c && new_city) && !self.comp_new_cities.contains(&i) {
+            if city.owner == me && !(i == c && new_city) && !pending.contains(&i) {
                 city_count[oidx(city.prod)] += 1;
                 total_cities += 1;
             }
@@ -458,7 +507,7 @@ impl Game {
             // if our one army producer is not on a lake, produce armies here instead
             if city_count[ARMY] == 1 {
                 if let Some(a) = (0..self.cities.len()).find(|&i| {
-                    self.cities[i].owner == Owner::Comp && self.cities[i].prod == PieceType::Army && !(i == c && new_city)
+                    self.cities[i].owner == me && self.cities[i].prod == PieceType::Army && !(i == c && new_city)
                 }) {
                     if !self.lake(ctx, a) {
                         self.comp_set_prod(c, PieceType::Army, new_city);
@@ -521,7 +570,8 @@ impl Game {
             return; // satellites fly themselves
         }
         self.pieces[i].moves_left = self.pieces[i].ptype.moves_for_hits(self.pieces[i].hits);
-        if ptype == PieceType::Fighter && self.own_city_at(self.pieces[i].loc, Owner::Comp) {
+        let me = self.pieces[i].owner;
+        if ptype == PieceType::Fighter && self.own_city_at(self.pieces[i].loc, me) {
             self.pieces[i].fuel = FIGHTER_FUEL;
         }
         let mut guard = 0;
@@ -538,11 +588,11 @@ impl Game {
                 self.pieces[i].moves_left = 0;
             }
             if ptype == PieceType::Fighter && self.pieces[i].hits > 0 {
-                if self.own_city_at(self.pieces[i].loc, Owner::Comp) {
+                if self.own_city_at(self.pieces[i].loc, me) {
                     self.pieces[i].moves_left = 0; // landed
                 } else if self.pieces[i].fuel <= 0 {
                     self.pieces[i].hits = 0; // crash & burn
-                    self.fighter_stats_mut(Owner::Comp).out_of_fuel += 1;
+                    self.fighter_stats_mut(me).out_of_fuel += 1;
                 }
             }
             guard += 1;
@@ -568,7 +618,8 @@ impl Game {
         if self.pieces[i].hits > 0 {
             centers.push((self.pieces[i].loc, self.pieces[i].ptype.sight_range()));
         }
-        self.comp_scan_many(&centers);
+        let me = self.pieces[i].owner;
+        self.ai_scan_many(me, &centers);
     }
 
     /// The transport (by index) an army is riding on: at sea on its square.
@@ -577,7 +628,8 @@ impl Game {
         if self.map[l.r][l.c] != Terrain::Sea {
             return None;
         }
-        self.pieces.iter().position(|t| t.loc == l && t.owner == Owner::Comp && t.hits > 0 && t.ptype == PieceType::Transport)
+        let me = self.pieces[i].owner;
+        self.pieces.iter().position(|t| t.loc == l && t.owner == me && t.hits > 0 && t.ptype == PieceType::Transport)
     }
 
     fn tt_loading(&self, t: usize) -> bool {
@@ -609,7 +661,7 @@ impl Game {
     /// 3. otherwise find the nearest land objective, and compare it with the nearest
     ///    loading transport (or city building one); head for whichever is better.
     fn army_move(&mut self, ctx: &mut Ctx, i: usize) {
-        let vmap = self.comp_view_flat();
+        let vmap = self.view_flat(ctx.me);
         let loc = ctx.idx(self.pieces[i].loc);
         self.set_army_wants_tt(i, false);
         let ship = self.army_ship(i);
@@ -683,7 +735,7 @@ impl Game {
         let consider = |game: &Game, at: usize, best: &mut Option<(usize, usize)>| {
             let l = ctx.loc(at);
             for (t, p) in game.pieces.iter().enumerate() {
-                if p.loc == l && p.owner == Owner::Comp && p.hits > 0 && p.ptype == PieceType::Transport
+                if p.loc == l && p.owner == ctx.me && p.hits > 0 && p.ptype == PieceType::Transport
                     && game.has_room_for(p, Some(id))
                 {
                     let count = game.tt_count(t);
@@ -718,13 +770,13 @@ impl Game {
     fn make_army_load_map(&self, geo: &Ctx, i: usize, vmap: &[u8]) -> Vec<u8> {
         let mut xmap = vmap.to_vec();
         for (t, p) in self.pieces.iter().enumerate() {
-            if p.owner == Owner::Comp && p.hits > 0 && p.ptype == PieceType::Transport && self.tt_loading(t) {
+            if p.owner == geo.me && p.hits > 0 && p.ptype == PieceType::Transport && self.tt_loading(t) {
                 xmap[geo.idx(p.loc)] = b'$';
             }
         }
         for city in &self.cities {
-            if city.owner == Owner::Comp && city.prod == PieceType::Transport
-                && (self.nearby_load(i, city.loc) || self.nearby_count(city.loc) < PieceType::Transport.capacity_for_hits(1)) {
+            if city.owner == geo.me && city.prod == PieceType::Transport
+                && (self.nearby_load(i, city.loc) || self.nearby_count(geo.me, city.loc) < PieceType::Transport.capacity_for_hits(1)) {
                     xmap[geo.idx(city.loc)] = b'x';
                 }
         }
@@ -735,11 +787,11 @@ impl Game {
         self.army_wants_tt(i) && self.dist(self.pieces[i].loc, l) <= 2
     }
 
-    fn nearby_count(&self, l: Loc) -> usize {
+    fn nearby_count(&self, me: Owner, l: Loc) -> usize {
         (0..self.pieces.len())
             .filter(|&i| {
                 let p = &self.pieces[i];
-                p.owner == Owner::Comp && p.hits > 0 && p.ptype == PieceType::Army && self.nearby_load(i, l)
+                p.owner == me && p.hits > 0 && p.ptype == PieceType::Army && self.nearby_load(i, l)
             })
             .count()
     }
@@ -751,7 +803,7 @@ impl Game {
     /// scores 0. Unexplored squares are filled in with the pruned predictions.
     fn unload_map(&mut self, ctx: &mut Ctx) -> Vec<u8> {
         if ctx.unload_map.is_none() {
-            let vmap = self.comp_view_flat();
+            let vmap = self.view_flat(ctx.me);
             let mut xmap = vmap.clone();
             unmark_explore_locs(ctx, &mut xmap);
             let base = xmap.clone();
@@ -789,7 +841,7 @@ impl Game {
     /// waiting for a ride (or explore), and attack enemy transports next to them. Full
     /// transports unload: they head for the best city to drop their armies at.
     fn transport_move(&mut self, ctx: &mut Ctx, i: usize) {
-        let vmap = self.comp_view_flat();
+        let vmap = self.view_flat(ctx.me);
         let loc = ctx.idx(self.pieces[i].loc);
         let count = self.tt_count(i);
         if count == 0 {
@@ -807,7 +859,7 @@ impl Game {
             let mut amap = vmap.clone();
             for p in self.pieces.iter().enumerate() {
                 let (a, p) = p;
-                if p.owner == Owner::Comp && p.hits > 0 && p.ptype == PieceType::Army && self.army_wants_tt(a) {
+                if p.owner == ctx.me && p.hits > 0 && p.ptype == PieceType::Army && self.army_wants_tt(a) {
                     amap[ctx.idx(p.loc)] = b'$';
                 }
             }
@@ -831,7 +883,7 @@ impl Game {
     /// Moves a fighter (`fighter_move`): attack anything next to it; head home if low on
     /// fuel; otherwise look for something to attack or explore.
     fn fighter_move(&mut self, ctx: &mut Ctx, i: usize) {
-        let vmap = self.comp_view_flat();
+        let vmap = self.view_flat(ctx.me);
         let loc = ctx.idx(self.pieces[i].loc);
         let new_loc = find_attack(ctx, &vmap, loc, FIGHTER_ATTACK, b".+");
         if new_loc != loc {
@@ -840,14 +892,14 @@ impl Game {
         }
         // return to base if low on fuel
         let (dist, city) = self.cities.iter()
-            .filter(|c| c.owner == Owner::Comp)
+            .filter(|c| c.owner == ctx.me)
             .map(|c| (ctx.dist(loc, ctx.idx(c.loc)), ctx.idx(c.loc)))
             .min_by_key(|&(d, _)| d)
             .unwrap_or((INF, loc));
         let mut pm;
         let mut dest = loc;
         if self.pieces[i].fuel <= dist + 2 && city != loc {
-            pm = find_dest(ctx, &vmap, loc, city, Owner::Comp, T_AIR, self);
+            pm = find_dest(ctx, &vmap, loc, city, T_AIR, self);
             dest = pm.best_loc;
         } else {
             pm = new_pathmap(ctx, loc, T_LAND);
@@ -862,7 +914,7 @@ impl Game {
     /// Moves a ship (`ship_move`): a damaged ship goes to port to be repaired; otherwise
     /// it attacks anything next to it, or hunts or explores.
     fn ship_move(&mut self, ctx: &mut Ctx, i: usize) {
-        let vmap = self.comp_view_flat();
+        let vmap = self.view_flat(ctx.me);
         let loc = ctx.idx(self.pieces[i].loc);
         let p = &self.pieces[i];
         if p.hits < p.ptype.max_hits() {
@@ -899,7 +951,7 @@ impl Game {
             }
             return;
         }
-        let vmap = self.comp_view_flat();
+        let vmap = self.view_flat(ctx.me);
         if vmap[dest] == UNEXPLORED && ctx.dist(dest, loc) == 2 {
             // exploring: any step next door will do
             for n in ctx.adj_on(loc).collect::<Vec<_>>() {
@@ -1224,7 +1276,7 @@ fn new_pathmap(ctx: &Ctx, start: usize, terrain: u8) -> PathMap {
 }
 
 /// The kind of terrain at `to` for a search coming from `from` (`terrain_type`).
-fn terrain_type(ctx: &Ctx, pm: &PathMap, vmap: &[u8], info: &MoveInfo, from: usize, to: usize, game: &Game) -> u8 {
+fn terrain_type(ctx: &Ctx, pm: &PathMap, vmap: &[u8], from: usize, to: usize, game: &Game) -> u8 {
     match vmap[to] {
         LAND => return T_LAND,
         SEA => return T_WATER,
@@ -1237,7 +1289,7 @@ fn terrain_type(ctx: &Ctx, pm: &PathMap, vmap: &[u8], info: &MoveInfo, from: usi
         LAND => T_LAND,
         _ => {
             let owner = ctx.city_at[to].map(|c| game.cities[c].owner);
-            if owner == Some(info.city_owner) { T_WATER } else { T_UNKNOWN }
+            if owner == Some(ctx.me) { T_WATER } else { T_UNKNOWN }
         }
     }
 }
@@ -1271,7 +1323,7 @@ fn expand_perimeter(
             if pm.cells[n].cost != INF {
                 continue;
             }
-            let new_type = terrain_type(ctx, pm, vmap, info, from, n, game);
+            let new_type = terrain_type(ctx, pm, vmap, from, n, game);
             if new_type == T_LAND && (kind & T_LAND) != 0 {
                 pm.cells[n] = Cell { cost: cur_cost + inc_lcost, inc_cost: inc_lcost, terrain: T_LAND };
                 out.push((n, true));
@@ -1376,10 +1428,10 @@ fn find_wlobj(ctx: &Ctx, vmap: &[u8], loc: usize, info: &MoveInfo, game: &Game) 
 
 /// The shortest path to a known destination (`vmap_find_dest`); its `best_loc` is `dest`
 /// if reachable, else `loc`.
-fn find_dest(ctx: &Ctx, vmap: &[u8], loc: usize, dest: usize, owner: Owner, kind: u8, game: &Game) -> PathMap {
+fn find_dest(ctx: &Ctx, vmap: &[u8], loc: usize, dest: usize, kind: u8, game: &Game) -> PathMap {
     let mut v = vmap.to_vec();
     v[dest] = b'%';
-    let info = MoveInfo { city_owner: owner, objectives: b"%", weights: &[1] };
+    let info = MoveInfo { objectives: b"%", weights: &[1] };
     let start = if kind == T_AIR { T_LAND } else { kind };
     let mut pm = new_pathmap(ctx, loc, start);
     let mut from = vec![loc];

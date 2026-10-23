@@ -125,6 +125,14 @@ pub struct Game {
     /// original's `resigned`). Its map can then be examined (`View::show_comp_view`).
     #[serde(default)]
     pub comp_resigned: bool,
+    /// The player's side is played by the AI too (`--headless`): it moves after the
+    /// player's automatic orders would, and before the computer. Not saved.
+    #[serde(skip)]
+    pub player_ai: bool,
+    /// The AI's view of the world when it plays the player's side (as `comp_map` is for
+    /// the computer). Not saved.
+    #[serde(skip)]
+    pub player_ai_map: Vec<Vec<u8>>,
     /// Debug observer mode (`~`): the player sees everything, live.
     #[serde(skip)]
     pub omniscient: bool,
@@ -174,6 +182,8 @@ impl Game {
             player_map,
             player_view,
             omniscient: false,
+            player_ai: false,
+            player_ai_map: Vec::new(),
             comp_resigned: false,
             fighter_stats: [FighterStats::default(); 2],
             comp_new_cities: Vec::new(),
@@ -587,6 +597,7 @@ impl Game {
     /// Generates the world and picks both starting cities at difficulty level
     /// `self.difficulty` (limited to the levels this world offers). The interactive game
     /// asks for the level in between instead (`generate_world`, then `choose_start`).
+    #[allow(dead_code)] // used by the tests
     pub fn setup_initial_states(&mut self) {
         let levels = self.generate_world();
         let level = (self.difficulty as usize).min(levels - 1);
@@ -1443,9 +1454,10 @@ impl Game {
         self.log(format!("Advanced to Turn {}.", self.turn));
 
         // The player's cities produce now; the computer's produce at the start of its own
-        // move (`comp_move`), as in the original.
+        // move (`comp_move`), as in the original. (An AI-run player side produces in its
+        // own move too.)
         for idx in 0..self.cities.len() {
-            if self.cities[idx].owner != Owner::Player {
+            if self.cities[idx].owner != Owner::Player || self.player_ai {
                 continue;
             }
             if self.advance_production(idx) {
@@ -1473,6 +1485,7 @@ impl Game {
             .collect();
 
         let (torus_flag, rows_n, cols_n) = (self.torus, self.rows, self.cols);
+        let player_ai = self.player_ai;
         // End of the previous turn: a damaged boat that sat in its own port without ever
         // moving repairs one hit (original rule; applies to both sides).
         for p in self.pieces.iter_mut() {
@@ -1495,8 +1508,9 @@ impl Game {
                 p.moves_left = p.ptype.moves_for_hits(p.hits);
             }
 
-            // Satellites take no orders: they fly themselves (`move_satellites`).
-            if p.owner == Owner::Player && p.ptype != PieceType::Satellite {
+            // Satellites take no orders: they fly themselves (`move_satellites`). An
+            // AI-run player side gives its own orders.
+            if p.owner == Owner::Player && p.ptype != PieceType::Satellite && !player_ai {
 
                 if p.activity == UnitActivity::Sentry {
                     let sight = p.ptype.sight_range();
@@ -1573,6 +1587,9 @@ impl Game {
             self.process_land_mode(idx);
         }
 
+        if self.player_ai {
+            self.ai_move(Owner::Player);
+        }
         self.comp_move();
 
         let mut dead_sats = Vec::new();

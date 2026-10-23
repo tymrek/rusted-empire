@@ -20,24 +20,40 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.iter().any(|a| a == "--headless") {
-        headless::run();
-        return ExitCode::SUCCESS;
-    }
-
     let value_of = |flags: &[&str]| {
         args.iter().position(|a| flags.contains(&a.as_str())).and_then(|i| args.get(i + 1)).cloned()
     };
-    let seed = match value_of(&["--seed"]) {
-        None => None,
-        Some(s) => match s.parse::<u64>() {
-            Ok(n) => Some(n),
-            Err(_) => {
-                eprintln!("--seed needs a whole number, got '{}'", s);
-                return ExitCode::from(2);
-            }
-        },
+    // A whole-number option: Ok(None) if absent, Err if not a number.
+    let number = |flag: &str| -> Result<Option<u64>, ExitCode> {
+        match value_of(&[flag]) {
+            None => Ok(None),
+            Some(s) => s.parse::<u64>().map(Some).map_err(|_| {
+                eprintln!("{} needs a whole number, got '{}'", flag, s);
+                ExitCode::from(2)
+            }),
+        }
     };
+    let seed = match number("--seed") {
+        Ok(n) => n,
+        Err(code) => return code,
+    };
+
+    if args.iter().any(|a| a == "--headless") {
+        let mut opts = headless::Options { seed, small: args.iter().any(|a| a == "--small"), ..Default::default() };
+        let numbers = (number("--games"), number("--level"), number("--turns"), number("--stalemate"));
+        match numbers {
+            (Ok(games), Ok(level), Ok(turns), Ok(stalemate)) => {
+                if let Some(n) = games { opts.games = (n as usize).max(1); }
+                opts.level = level.map(|n| n as usize);
+                if let Some(n) = turns { opts.max_turns = n as i32; }
+                if let Some(n) = stalemate { opts.stalemate_turns = n as i32; }
+            }
+            (Err(code), ..) | (_, Err(code), ..) | (_, _, Err(code), _) | (.., Err(code)) => return code,
+        }
+        headless::run(opts);
+        return ExitCode::SUCCESS;
+    }
+
     let opts = app::Options {
         load_file: value_of(&["--load", "-l"]),
         seed,
