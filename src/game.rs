@@ -623,11 +623,12 @@ impl Game {
 
     /// The continents a side may start on, as the original's `find_cont`: up to the first
     /// ten (scanning the map row by row) that have at least two cities, one of them on the
-    /// shore. Each gets a value: cities beyond the first two count most (a shore city
+    /// shore of the open ocean (`open_ocean`; the original accepted any shore, lakes too). Each gets a value: cities beyond the first two count most (a shore city
     /// 3, an inland city 2, times 1000), then land area.
     pub fn start_continents(&self) -> Vec<StartContinent> {
         const MAX_CONT: usize = 10;
         let on_board = |l: Loc| l.r >= 1 && l.c >= 1 && l.r + 1 < self.rows && l.c + 1 < self.cols;
+        let ocean = self.open_ocean();
         let mut marked = vec![vec![false; self.cols]; self.rows];
         let mut found = Vec::new();
         for r in 0..self.rows {
@@ -647,7 +648,10 @@ impl Game {
                     nland += 1;
                     if let Some(ci) = self.cities.iter().position(|ct| ct.loc == l) {
                         cities.push(ci);
-                        if self.neighbors(l).any(|n| on_board(n) && !self.is_land(n)) {
+                        // A port on the open ocean (QOL change: the original also counted
+                        // a city on a lake, which can leave a side with no way off its
+                        // continent).
+                        if self.neighbors(l).any(|n| on_board(n) && ocean[n.r][n.c]) {
                             nshore += 1;
                         }
                     }
@@ -673,6 +677,38 @@ impl Game {
             }
         }
         found
+    }
+
+    /// The open ocean: the largest connected body of water on the playable map. Every
+    /// other body of water is a lake. (On a torus map, water connects across the seams.)
+    pub fn open_ocean(&self) -> Vec<Vec<bool>> {
+        let on_board = |l: Loc| l.r >= 1 && l.c >= 1 && l.r + 1 < self.rows && l.c + 1 < self.cols;
+        let mut label = vec![vec![0usize; self.cols]; self.rows];
+        let mut sizes = vec![0usize]; // body 0 = not water
+        for r in 0..self.rows {
+            for c in 0..self.cols {
+                let start = Loc { r, c };
+                if !on_board(start) || label[r][c] != 0 || self.is_land(start) {
+                    continue;
+                }
+                let id = sizes.len();
+                let mut size = 0;
+                let mut stack = vec![start];
+                label[r][c] = id;
+                while let Some(l) = stack.pop() {
+                    size += 1;
+                    for n in self.neighbors(l) {
+                        if on_board(n) && label[n.r][n.c] == 0 && !self.is_land(n) {
+                            label[n.r][n.c] = id;
+                            stack.push(n);
+                        }
+                    }
+                }
+                sizes.push(size);
+            }
+        }
+        let biggest = (1..sizes.len()).max_by_key(|&i| (sizes[i], std::cmp::Reverse(i))).unwrap_or(0);
+        label.iter().map(|row| row.iter().map(|&id| id != 0 && id == biggest).collect()).collect()
     }
 
     /// Every (player continent, computer continent) pair, easiest for the player first:

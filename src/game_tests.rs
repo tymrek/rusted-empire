@@ -2622,4 +2622,32 @@ mod tests {
         assert!(Game::load_game(path.to_str().unwrap()).unwrap().comp_resigned, "remembered in saves");
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn test_a_lake_shore_is_not_a_port_for_starting() {
+        let mut game = Game::with_seed(20, 30, 0, 9);
+        game.map = vec![vec![Terrain::Sea; 30]; 20];
+        // Island A (rows 2-10, cols 2-12) around a lake (rows 5-7, cols 5-8); island B.
+        for r in 2..=10 { for c in 2..=12 { game.map[r][c] = Terrain::Land; } }
+        for r in 5..=7 { for c in 5..=8 { game.map[r][c] = Terrain::Sea; } }
+        for r in 2..=6 { for c in 18..=23 { game.map[r][c] = Terrain::Land; } }
+        game.cities.push(city(Loc { r: 4, c: 6 }, Owner::Neutral)); // on the lake
+        game.cities.push(city(Loc { r: 8, c: 7 }, Owner::Neutral)); // on the lake
+        game.cities.push(city(Loc { r: 2, c: 18 }, Owner::Neutral));
+        game.cities.push(city(Loc { r: 6, c: 23 }, Owner::Neutral));
+
+        let ocean = game.open_ocean();
+        assert!(ocean[0 + 1][1] && !ocean[6][6], "the lake is not the ocean");
+        let conts = game.start_continents();
+        assert_eq!(conts.len(), 1, "island A's cities are only on its lake");
+        assert_eq!(conts[0].cities, vec![2, 3]);
+
+        // Give A a city on the open ocean: now it qualifies, and its lake cities count
+        // as inland ones: (1 - 1) * 3 + (3 - 1 - 1) * 2 = 2, times 1000, plus land.
+        game.cities.push(city(Loc { r: 2, c: 2 }, Owner::Neutral));
+        let conts = game.start_continents();
+        assert_eq!(conts.len(), 2);
+        let land_a = 9 * 11 - 3 * 4;
+        assert_eq!(conts[0].value, 2000 + land_a);
+    }
 }
