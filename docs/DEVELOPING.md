@@ -223,7 +223,7 @@ Two things to keep in mind when changing the AI:
 
 ### Unit and regression tests
 
-`cargo test` runs about 150 tests: rules (combat, movement, cargo, fuel, satellites,
+`cargo test` runs about 190 tests: rules (combat, movement, cargo, fuel, satellites,
 production and retooling, city assault, the endgame), the AI (fixed scenarios, and
 that it can play either side), world generation and start selection, keys, and the
 save format. Tests build small hand-made maps with the helpers at the top of
