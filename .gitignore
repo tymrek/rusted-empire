@@ -1,0 +1,10 @@
+cat > .gitignore <<'EOF'
+/target
+*.orig
+*.rej
+*.sav
+*.sav.tmp
+*.patch
+playtest_metrics.csv
+ai_metrics.csv
+EOF
