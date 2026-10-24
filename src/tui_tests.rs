@@ -396,6 +396,22 @@ fn screen_edit_mode_describes_the_square_under_the_cursor() {
 }
 
 #[test]
+fn screen_edit_cursor_is_visible_everywhere() {
+    // Regression: the cursor was drawn only on explored squares, so moving it into the
+    // fog (or viewing the enemy's map) made it vanish.
+    let mut g = world(SEED);
+    let enemy = g.cities[comp_city(&g)].loc;
+    assert_eq!(g.player_map[enemy.r][enemy.c], 0, "the test needs an unexplored square");
+    for comp_view in [false, true] {
+        let mut view = View { mode: GameMode::Edit, cursor: enemy, show_comp_view: comp_view, ..View::default() };
+        let (x, y) = map_square(&g, enemy, 120, 40, enemy).unwrap();
+        let ui = render(&g, &mut view, 120, 40, "", None);
+        assert_eq!(ui.screen().at(x, y), "█", "cursor hidden (enemy map: {})", comp_view);
+        assert!(ui.screen().text().contains(&format!("At: ({},{})", enemy.r, enemy.c)), "the panel says where the cursor is");
+    }
+}
+
+#[test]
 fn screen_message_log_shows_the_newest_and_scrolls_back() {
     let mut g = world(SEED);
     for i in 0..20 {

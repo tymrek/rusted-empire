@@ -165,7 +165,7 @@ units without waiting for their turn. The prompt reads
 
 | Key | Action |
 |---|---|
-| arrows / keypad | Move the cursor. |
+| arrows / keypad | Move the cursor (the panel on the right shows its position). |
 | `P` | Change what the city under the cursor builds. |
 | `O` | Give an order to the unit under the cursor. |
 | `W` | Wake units under the cursor: one type, or `*` for all. Waking a transport or carrier also brings up everything aboard. |

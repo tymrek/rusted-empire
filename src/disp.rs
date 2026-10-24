@@ -150,6 +150,12 @@ pub fn render(f: &mut Frame, game: &Game, view: &View, prompt: &str, active_blin
             let mut spans = Vec::new();
             for &c in &col_coords {
                 let loc = Loc { r, c };
+                // The cursor goes on top of everything, explored or not, so it can't vanish
+                // into the fog.
+                if view.shows_cursor() && view.cursor == loc {
+                    spans.push(Span::styled("█", Style::default().fg(Color::White)));
+                    continue;
+                }
                 if view.show_comp_view {
                     // The computer's map, as it has seen the world (after it resigns).
                     let ch = match game.comp_map[r][c] { 0 => b' ', ch => ch };
@@ -169,11 +175,6 @@ pub fn render(f: &mut Frame, game: &Game, view: &View, prompt: &str, active_blin
 
                 if !is_explored {
                     spans.push(Span::raw(" "));
-                    continue;
-                }
-
-                if view.shows_cursor() && view.cursor == loc {
-                    spans.push(Span::styled("█", Style::default().fg(Color::White)));
                     continue;
                 }
 
@@ -254,7 +255,8 @@ let mut sidebar_lines = vec![
         if view.mode == GameMode::Edit {
             sidebar_lines.push(Line::from(Span::styled("--- CURSOR INFO ---", Style::default().fg(Color::Magenta))));
             let loc = view.cursor;
-            
+            sidebar_lines.push(Line::from(format!(" At: ({},{})", loc.r, loc.c)));
+
             if game.player_map[loc.r][loc.c] == 1 {
                 let terrain = if game.map[loc.r][loc.c] == Terrain::Land { "Land" } else { "Sea" };
                 sidebar_lines.push(Line::from(format!(" Terrain: {}", terrain)));

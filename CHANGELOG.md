@@ -35,6 +35,9 @@ terminal interface still needs wider testing before 1.0.
   is what makes the interface testable, and is the seam a network client will use.
 
 ### Fixed
+- **The edit-mode cursor vanished in unexplored territory** (and on the enemy's map):
+  it was only drawn on squares you had explored. It now always shows, and the
+  edit-mode panel gives its position.
 - **Fighters low on fuel stalled in the air for good.** A fighter on an automatic order
   (explore, attack, destination, vector, land) that reached bingo fuel was given a
   course home but no moves that turn; the next turn the fuel check, seeing it still
