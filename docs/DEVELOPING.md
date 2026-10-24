@@ -20,7 +20,8 @@ It describes 0.9.0-beta.
 
 ```
 cargo build --release
-cargo test --release        # 154 tests, under a second
+cargo test                  # about 190 tests, including the interface tests
+python3 tools/tui_smoke.py  # end to end, needs `pip install pyte` and a release build
 cargo clippy
 ```
 
@@ -44,8 +45,11 @@ the oldest toolchain you support before sending a change. Dependencies are pinne
 | `disp.rs` | ~360 | Draws the screen with ratatui. |
 | `view.rs` | ~75 | `View`: what the screen is showing (mode, cursor, scroll, map centre). Never saved. |
 | `keys.rs` | ~120 | The keyboard vocabulary: unit keys, direction keys, order keys and menus. |
+| `ui.rs` | ~100 | The `Ui` trait (all of the front end's input and output) and `TermUi`, the real terminal. |
 | `terminal.rs` | ~40 | `TerminalGuard`: raw mode and the alternate screen, restored on every exit path, including panics. |
 | `game_tests.rs` | ~2700 | Rule tests, regression tests, save-format tests. |
+| `tui_tests.rs` | ~800 | Interface tests: screen, scripted and fuzz (see [Interface tests](#interface-tests)). |
+| `tools/tui_smoke.py` | | End-to-end test of the binary in a pseudo-terminal. |
 
 ## Architecture
 
@@ -71,7 +75,7 @@ the oldest toolchain you support before sending a change. Dependencies are pinne
   created fresh on load and never saved.
 - **The front end talks to `Game` through command methods**: `attempt_move`,
   `order_unit`, `skip_unit`, `sentry_unit`, `wake_unit`, `wake_units_at`,
-  `launch_cargo_at`, `set_production`, `set_standing_order(OrderScope, ...)`,
+  `set_production`, `set_standing_order(OrderScope, ...)`,
   `process_turn`, `save_game` and `load_game`. New front-end features should add a
   command method rather than writing to `Game` fields from `app.rs`. A few older
   paths still set fields directly (for example the edit-mode `O` order sets
@@ -86,7 +90,9 @@ the oldest toolchain you support before sending a change. Dependencies are pinne
   hand), `ptype`, `owner`, `loc`, `hits`, `moves_left`, `activity` (its order) and
   `fuel` (fighters: squares left; satellites: turns left). Units in a transport's or
   carrier's **hold** live in that piece's `cargo` vector, not in `Game::pieces`.
-  Waking the cargo moves it back to `pieces` ("on deck"). Code that counts or searches
+  Waking the cargo moves it back to `pieces` ("on deck"): `wake_cargo`, called by
+  `wake_unit` (`W`) and, for a transport's armies, by `unload_on_arrival` after every
+  movement order the player's units carry out. Code that counts or searches
   units must decide whether to look in holds; see `count_armies` in
   `comp_should_resign` for a recursive count.
 - **Piece indices are not stable.** Dead pieces are removed with
@@ -270,21 +276,58 @@ Debug builds (`cargo build`, not `--release`) have two extra keys at the turn pr
 - `Z` enters observer mode, where the player's turns are skipped and the computer plays
   on (`O` or `Esc` to stop).
 
-### TUI testing (planned before 1.0)
+### Interface tests
 
-The terminal interface has no automated tests yet. That's the main reason this is a
-beta. The plan:
+The terminal interface is tested at three levels.
 
-1. **Screen tests.** Let `disp.rs` draw on any ratatui backend instead of fetching the
-   real terminal itself, then render seeded game states to `TestBackend` and check the
-   buffer: sidebar values, prompt text, fog of war, and small terminal sizes.
-2. **Scripted input.** Put key reading in `app.rs` behind a small event-source trait,
-   so tests can feed key sequences (move, order, edit mode, standing orders, save,
-   load) and check `Game` and `View` after each step. The same trait is the input side
-   of a future network client.
-3. **End to end and random input.** Drive the release binary in a pseudo-terminal,
-   with scripted sessions and long runs of random keys on seeded games, failing on any
-   panic, hang or unloadable save.
+**How it's made testable.** `app.rs` never touches the terminal. All its input and
+output goes through the `Ui` trait in `ui.rs`: `poll`, `read`, `drain` for input,
+`draw` and `banner` for output, plus `pause` (automove) and `blink_on`. `TermUi` is
+the real terminal. `disp::render` draws one frame onto any ratatui backend.
+`Session::save_file` and `autosave_file` say where saves go, so tests don't write
+into the working directory.
+
+1. **Screen tests** (`tui_tests.rs`, first section). They render game states into
+   ratatui's `TestBackend` and check the text on screen: the title and status panel,
+   the prompt at 80 columns, fog of war square by square (`map_square` maps a map
+   square to its screen cell), blinking, the edit-mode panel, message scrolling, and
+   rendering at every size from 1×1 to 300×100 in every mode.
+2. **Scripted tests** (second section). `ScriptUi` implements `Ui` from a list of
+   `Step`s: key and mouse events, and `Wait(n)` for "no input for n polls" (to let
+   automove run). Each test builds a seeded game, scripts some keys with `typed("...")`
+   (`\r` Enter, `\x1b` Esc, `\x08` Backspace), runs the real `app::play` or
+   `app::start_session`, then checks the `Game`, the `View`, the last prompt and the
+   screen. When the script runs out, every input call returns the `SCRIPT_END` error,
+   so `play()` returns wherever the game was waiting. If the front end redraws 5000
+   times without asking for input, the test fails as a hang and names the prompt.
+3. **Fuzz tests** (third section). Long random sequences of keys, arrows, Enter, Esc,
+   Ctrl-C, mouse events and pauses, weighted towards real play, fed into seeded games
+   on screens of different sizes. After each game the state must pass
+   `Game::validate`, the cursor must be on the map, and the game must save and load.
+   Each fuzz run has a time limit, so a hang fails the test instead of stopping the
+   suite. Runs are deterministic, so a failing seed replays exactly. (A loaded save
+   normally continues with a freshly seeded RNG; in test builds that RNG is seeded with
+   a fixed value instead, see `loaded_rng`.) `cargo test` runs a short fuzz; the long one is
+   `cargo test --release -- --ignored fuzz_long` (set `RS_EMPIRE_FUZZ_SEEDS` and
+   `RS_EMPIRE_FUZZ_EVENTS` to size it).
+
+**End to end** (`tools/tui_smoke.py`). It runs the release binary in a real
+pseudo-terminal and types real escape sequences, covering what the in-process tests
+can't: crossterm's key parsing, raw mode, the startup banners, resizing, and the
+terminal being restored on every exit. It needs Python and `pyte`:
+
+```
+pip install pyte
+cargo build --release
+python3 tools/tui_smoke.py
+```
+
+**Writing a new interface test.** Start from the closest existing test in
+`tui_tests.rs`. Build the state with `world(SEED)` and `add_unit`, script the keys,
+call `play(&mut s)` (false means the script ran out, true means the game ended or the
+player quit), then assert on `s.game`, `s.view` and `ui.screen()` (`.prompt`,
+`.text()`, `.at(x, y)`). Prompts show their keys, so a test reads like a player at
+the keyboard.
 
 ## Performance
 
@@ -302,7 +345,9 @@ move, cheaper checks first), verified with the fingerprint check above.
 When the game is split into a server and clients:
 
 - **Server**: `Game` (`game.rs`, `ai.rs`, `models.rs`). It owns the RNG and all rules.
-- **Client**: `app.rs`, `disp.rs`, `view.rs`, `keys.rs`, `terminal.rs`.
+- **Client**: `app.rs`, `disp.rs`, `view.rs`, `keys.rs`, `ui.rs`, `terminal.rs`.
+- **`Ui` is the client's I/O boundary.** A network client can implement it, or sit
+  behind `TermUi` and forward the same command methods to a server.
 - **The protocol** is roughly the command methods listed under
   [Architecture](#architecture) (client to server), plus a per-player view of the game
   (server to client).

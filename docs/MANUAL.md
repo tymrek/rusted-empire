@@ -52,8 +52,8 @@ A new game asks three questions:
   the hits and moves of the active unit.
 - **Messages.** Combat results, production, sentries waking, and so on. Scroll back
   with the mouse wheel; a new message scrolls back down.
-- **Prompt line.** Always shows what is being asked and which keys answer it. On a
-  narrow terminal it can be cut off (see Known issues in the changelog).
+- **Prompt line.** Always shows what is being asked and which keys answer it. A long
+  prompt wraps onto a second line.
 
 ### Map symbols
 
@@ -131,12 +131,11 @@ fighter also warns you if a move would leave it without enough fuel to reach a b
 | `D` | Destination | all | Pick a square with the cursor and `Enter`; the unit travels there over the following turns. |
 | `V` | Vector | all | March in a direction until stopped. |
 | `R` | Random | all | Wander at random. |
-| `W` | Wake | all | Clear the unit's standing order. On a transport or carrier, also brings its cargo on deck. |
+| `W` | Wake | all | Clear the unit's standing order. On a transport or carrier, also brings everything aboard up for orders (unloading or launching). |
 | `T` | Wait for transport | armies | Board the next transport with room that comes alongside. |
 | `L` | Land | fighters | Fly to the nearest base and land. |
 | `F` | Fill | transports, carriers | Wait in place until full, then wake. |
 | `U` | Upgrade (repair) | ships | Sail to the nearest of your cities and stay until fully repaired. |
-| `X` | Eject | transports, carriers | Bring the cargo up on deck so each unit can be given orders. |
 
 A unit on a standing order that gets stuck (blocked, out of targets) comes back for
 orders, and the prompt says which order it was on, for example `[STUCK: Dest]`.
@@ -162,15 +161,14 @@ about, `A`, `M`/`O`, `E` and `Q` work too; `N` and `S` mean skip and sentry ther
 
 Edit mode (`E`) gives you a free cursor on the map, so you can work on cities and
 units without waiting for their turn. The prompt reads
-`[Arrows/NumPad] Move | [P]rod | [O]rders | [W]ake | e[X]ject | [I]nitial Orders | [E]xit Edit`.
+`[Arrows/NumPad] Move | [P]rod | [O]rders | [W]ake | [I]nitial Orders | [E]xit Edit`.
 
 | Key | Action |
 |---|---|
 | arrows / keypad | Move the cursor. |
 | `P` | Change what the city under the cursor builds. |
 | `O` | Give an order to the unit under the cursor. |
-| `W` | Wake units under the cursor: one type, or `*` for all. |
-| `X` | Bring the cargo of transports or carriers under the cursor on deck. |
+| `W` | Wake units under the cursor: one type, or `*` for all. Waking a transport or carrier also brings up everything aboard. |
 | `I` | Set a **standing order for new units**, either for the city under the cursor (local) or for every city (global). For example, every fighter built goes on sentry, or every army explores. A city's local order takes precedence over the global one. |
 | `E` or `Esc` | Leave edit mode. |
 
@@ -205,6 +203,26 @@ units without waiting for their turn. The prompt reads
 - **Cargo.** Armies aboard a transport that sinks are lost, and so are fighters
   aboard a sunk carrier.
 - **Score.** Each side scores the build cost of every enemy unit it destroys.
+
+## Transports and carriers
+
+An army boards a transport by moving onto it (or with the `T` order, waiting for one
+to come alongside), and a fighter lands on a carrier the same way. Units aboard go to
+sleep in the hold: they sail with the ship and are not asked for orders, so you can
+send a loaded transport along a coast without being asked about its troops every
+turn.
+
+- **On arrival, the armies come up by themselves.** When a transport carrying armies
+  finishes a standing order next to land (it reaches its destination, or a vector,
+  explore, random or attack order stops), its armies come up on deck and are asked for
+  orders. Move them ashore with the keypad.
+- **`W` on the transport unloads at any time**, wherever it is. On a carrier, `W`
+  launches its fighters. Fighters never come up by themselves.
+- Units that come up on deck but stay aboard sail on with the ship, and are asked for
+  orders each turn until they leave it or are put on sentry.
+
+In the original, armies aboard a transport are asked for orders whenever it is next to
+land; waiting until it arrives is a change in this port.
 
 ## Fighters
 
