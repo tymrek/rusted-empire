@@ -3,19 +3,17 @@
 //! This is the terminal front end. It turns keys into calls on `Game` (moves and the
 //! order commands such as `order_unit` and `set_standing_order`) and keeps everything
 //! about the screen itself in a `View`. The game never reads the view.
-use crate::disp;
+//!
+//! All input and output goes through a `Ui` (see `ui.rs`): the real terminal in play,
+//! a scripted one in the interface tests (`tui_tests.rs`).
 use crate::game::{Game, OrderScope, MAP_COLS, MAP_ROWS};
 use crate::keys::{self, OrderKey, PIECE_KEYS};
 use crate::models::{Loc, MoveResult, Owner, Piece, PieceType, UnitActivity};
 use crate::terminal::TerminalGuard;
+use crate::ui::{TermUi, Ui};
 use crate::view::{self, GameMode, View};
-use crossterm::{
-    cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
-    terminal::{self, ClearType},
-    ExecutableCommand,
-};
-use std::io::{self, Write};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use std::io;
 use std::time::{Duration, Instant};
 
 /// How long to wait for a key before redrawing (for blinking and animation).
@@ -24,8 +22,11 @@ const POLL: Duration = Duration::from_millis(50);
 const IDLE_POLL: Duration = Duration::from_millis(100);
 /// Pause after each turn in automove mode, so it can be watched.
 const AUTO_TURN_PAUSE: Duration = Duration::from_millis(150);
-/// Half a blink cycle for the unit or city being asked about.
-const BLINK_MS: u128 = 300;
+
+/// Where `S` saves and `L` loads.
+pub const SAVE_FILE: &str = "empire.sav";
+/// Where autosaves go.
+pub const AUTOSAVE_FILE: &str = "empire_auto.sav";
 
 /// What the command line asked for.
 pub struct Options {
@@ -38,10 +39,15 @@ pub struct Options {
     pub torus: bool,
 }
 
-/// The game being played and this player's view of it.
-struct Session {
-    game: Game,
-    view: View,
+/// The game being played, this player's view of it, and where input and output go.
+pub(crate) struct Session {
+    pub(crate) game: Game,
+    pub(crate) view: View,
+    pub(crate) ui: Box<dyn Ui>,
+    /// Where `S` saves and `L` loads.
+    pub(crate) save_file: String,
+    /// Where autosaves go.
+    pub(crate) autosave_file: String,
 }
 
 /// True for Ctrl-C.
@@ -49,44 +55,45 @@ fn is_ctrl_c(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
 }
 
-/// Throws away keys typed ahead, so they don't act on the next screen.
-fn drain_input() {
-    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-        let _ = event::read();
+impl Session {
+    pub(crate) fn new(game: Game, ui: Box<dyn Ui>) -> Self {
+        Session { game, view: View::default(), ui, save_file: SAVE_FILE.into(), autosave_file: AUTOSAVE_FILE.into() }
     }
-}
 
-/// Waits for the next key press.
-fn read_key() -> KeyEvent {
-    loop {
-        if let Ok(Event::Key(k)) = event::read() {
-            return k;
+    fn draw(&mut self, prompt: &str) -> io::Result<()> {
+        self.ui.draw(&self.game, &mut self.view, prompt, None)
+    }
+
+    fn draw_blinking(&mut self, prompt: &str, blink: (Loc, bool)) -> io::Result<()> {
+        self.ui.draw(&self.game, &mut self.view, prompt, Some(blink))
+    }
+
+    /// Waits for the next key press.
+    fn read_key(&mut self) -> io::Result<KeyEvent> {
+        loop {
+            if let Event::Key(k) = self.ui.read()? {
+                return Ok(k);
+            }
         }
     }
-}
 
-/// Whether the blinking square is showing at the moment.
-fn blink_on(since: Instant) -> bool {
-    (since.elapsed().as_millis() / BLINK_MS) & 1 == 0
-}
-
-impl Session {
-    fn draw(&mut self, prompt: &str) {
-        disp::refresh_display_with_input(&self.game, &mut self.view, prompt);
-    }
-
-    fn draw_blinking(&mut self, prompt: &str, blink: (Loc, bool)) {
-        disp::refresh_display_with_input_blinking(&self.game, &mut self.view, prompt, Some(blink));
+    /// The next key or mouse event within `timeout`, if any.
+    fn next_event(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
+        if self.ui.poll(timeout)? {
+            Ok(Some(self.ui.read()?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Shows `prompt` and waits for Y or N (other keys are ignored).
-    fn ask_yes_no(&mut self, prompt: &str) -> bool {
-        self.draw(prompt);
+    fn ask_yes_no(&mut self, prompt: &str) -> io::Result<bool> {
+        self.draw(prompt)?;
         loop {
-            if let KeyCode::Char(c) = read_key().code {
+            if let KeyCode::Char(c) = self.read_key()?.code {
                 match c.to_ascii_lowercase() {
-                    'y' => return true,
-                    'n' => return false,
+                    'y' => return Ok(true),
+                    'n' => return Ok(false),
                     _ => {}
                 }
             }
@@ -94,56 +101,53 @@ impl Session {
     }
 
     /// Asks to confirm quitting; logs it if the player changes their mind.
-    fn confirm_quit(&mut self) -> bool {
-        let quit = self.ask_yes_no("Really quit game? [Y/N]: ");
+    fn confirm_quit(&mut self) -> io::Result<bool> {
+        let quit = self.ask_yes_no("Really quit game? [Y/N]: ")?;
         if !quit {
             self.game.log(String::from("Quit cancelled."));
         }
-        quit
+        Ok(quit)
     }
 
     /// Shows `prompt` and waits for a key that `choose` accepts. Esc gives `None`.
-    fn pick<T>(&mut self, prompt: &str, choose: impl Fn(char) -> Option<T>) -> Option<T> {
-        self.draw(prompt);
+    fn pick<T>(&mut self, prompt: &str, choose: impl Fn(char) -> Option<T>) -> io::Result<Option<T>> {
+        self.draw(prompt)?;
         loop {
-            let key = read_key();
+            let key = self.read_key()?;
             if key.code == KeyCode::Esc {
-                return None;
+                return Ok(None);
             }
             if let KeyCode::Char(c) = key.code {
                 if let Some(t) = choose(c) {
-                    return Some(t);
+                    return Ok(Some(t));
                 }
             }
         }
     }
 
     /// Asks for a direction (arrows or keypad). Esc gives `None`.
-    fn pick_direction(&mut self, ptype: PieceType) -> Option<(i32, i32)> {
-        self.draw(&format!("Set march direction for {:?} [Arrows/NumPad] or [Esc] Cancel: ", ptype));
+    fn pick_direction(&mut self, ptype: PieceType) -> io::Result<Option<(i32, i32)>> {
+        self.draw(&format!("Set march direction for {:?} [Arrows/NumPad] or [Esc] Cancel: ", ptype))?;
         loop {
-            let key = read_key();
+            let key = self.read_key()?;
             if key.code == KeyCode::Esc {
-                return None;
+                return Ok(None);
             }
             if let Some(dir) = keys::dir_for_key(key.code) {
-                return Some(dir);
+                return Ok(Some(dir));
             }
         }
     }
 
     /// Lets the player move a cursor from `start` and pick a square with Enter (Esc gives
     /// `None`). The view is in `mode` meanwhile, and goes back as it was afterwards.
-    fn pick_location(&mut self, prompt: &str, start: Loc, mode: GameMode) -> Option<Loc> {
+    fn pick_location(&mut self, prompt: &str, start: Loc, mode: GameMode) -> io::Result<Option<Loc>> {
         let (old_mode, old_cursor) = (self.view.mode, self.view.cursor);
         self.view.mode = mode;
         self.view.cursor = start;
         let picked = loop {
-            self.draw(prompt);
-            if !event::poll(POLL).unwrap_or(false) {
-                continue;
-            }
-            let Ok(Event::Key(key)) = event::read() else { continue };
+            self.draw(prompt)?;
+            let Some(Event::Key(key)) = self.next_event(POLL)? else { continue };
             match key.code {
                 KeyCode::Esc => break None,
                 KeyCode::Enter => break Some(self.view.cursor),
@@ -156,26 +160,27 @@ impl Session {
         };
         self.view.mode = old_mode;
         self.view.cursor = old_cursor;
-        picked
+        Ok(picked)
     }
 
     /// Asks which order to give a unit of type `ptype` (`title` names what is being
     /// ordered), including a direction or destination if the order needs one. Esc gives
     /// `None`; backing out of a direction or destination goes back to the order menu.
-    fn pick_order(&mut self, ptype: PieceType, title: &str, dest_start: Loc, dest_mode: GameMode) -> Option<UnitActivity> {
+    fn pick_order(&mut self, ptype: PieceType, title: &str, dest_start: Loc, dest_mode: GameMode) -> io::Result<Option<UnitActivity>> {
         let menu = format!("{} - {}: ", title, keys::order_menu(ptype).join(","));
         loop {
-            match self.pick(&menu, |c| keys::order_for_key(c, ptype))? {
-                OrderKey::Order(act) => return Some(act),
+            let Some(choice) = self.pick(&menu, |c| keys::order_for_key(c, ptype))? else { return Ok(None) };
+            match choice {
+                OrderKey::Order(act) => return Ok(Some(act)),
                 OrderKey::PickDirection => {
-                    if let Some((dr, dc)) = self.pick_direction(ptype) {
-                        return Some(UnitActivity::Dir(dr, dc));
+                    if let Some((dr, dc)) = self.pick_direction(ptype)? {
+                        return Ok(Some(UnitActivity::Dir(dr, dc)));
                     }
                 }
                 OrderKey::PickDestination => {
                     let prompt = format!("Pick destination for {:?} [Arrows/NumPad] Move | [Enter] Confirm | [Esc] Cancel: ", ptype);
-                    if let Some(dest) = self.pick_location(&prompt, dest_start, dest_mode) {
-                        return Some(UnitActivity::Dest(dest));
+                    if let Some(dest) = self.pick_location(&prompt, dest_start, dest_mode)? {
+                        return Ok(Some(UnitActivity::Dest(dest)));
                     }
                 }
             }
@@ -207,7 +212,7 @@ impl Session {
     /// Asks what city `city_idx` should build. `new_city` is true for a city just won (or
     /// the starting city): it starts from scratch, so it pays the retooling cost whatever
     /// is chosen.
-    fn prompt_city_production(&mut self, city_idx: usize, new_city: bool) {
+    fn prompt_city_production(&mut self, city_idx: usize, new_city: bool) -> io::Result<()> {
         self.view.center = None;
         let city_loc = self.game.cities[city_idx].loc;
         let prompt = format!(
@@ -216,18 +221,16 @@ impl Session {
         );
         let since = Instant::now();
         loop {
-            self.draw_blinking(&prompt, (city_loc, blink_on(since)));
-            if !event::poll(POLL).unwrap_or(false) {
-                continue;
-            }
-            let Ok(Event::Key(key)) = event::read() else { continue };
+            let blink = self.ui.blink_on(since);
+            self.draw_blinking(&prompt, (city_loc, blink))?;
+            let Some(Event::Key(key)) = self.next_event(POLL)? else { continue };
             if key.code == KeyCode::Esc {
                 if new_city {
                     let prod = self.game.cities[city_idx].prod;
                     self.game.set_production(city_idx, prod, true);
                 }
                 self.game.log(format!("Production unchanged for City at ({},{}).", city_loc.r, city_loc.c));
-                return;
+                return Ok(());
             }
             let KeyCode::Char(c) = key.code else { continue };
             match keys::piece_for_key(c) {
@@ -237,7 +240,7 @@ impl Session {
                 Some(prod) => {
                     self.game.set_production(city_idx, prod, new_city);
                     self.game.log(format!("City at ({},{}) assigned to build: {:?}", city_loc.r, city_loc.c, prod));
-                    return;
+                    return Ok(());
                 }
                 None => self.game.log(format!("Invalid choice '{}'. Press a valid unit key.", c)),
             }
@@ -256,64 +259,43 @@ pub fn run(opts: Options) -> io::Result<()> {
     // Restores the terminal on every exit path from here on, including `?` errors.
     let _terminal_guard = TerminalGuard::enter()?;
 
-    match start_session(opts)? {
-        Some((session, autosave_interval)) => play(session, autosave_interval),
+    match start_session(opts, Box::new(TermUi::new()))? {
+        Some((mut session, autosave_interval)) => play(&mut session, autosave_interval),
         None => Ok(()),
     }
 }
 
 /// Shows a banner and reads a number. `None` means the player pressed Ctrl-C.
-fn prompt_number(title: &str, question: &str) -> io::Result<Option<String>> {
-    let mut stdout = io::stdout();
-    stdout.execute(terminal::Clear(ClearType::All))?;
-    stdout.execute(cursor::MoveTo(10, 5))?;
-    print!("==================================================");
-    stdout.execute(cursor::MoveTo(10, 6))?;
-    print!(" {:<62}", title);
-    stdout.execute(cursor::MoveTo(10, 7))?;
-    print!("==================================================");
-    stdout.execute(cursor::MoveTo(10, 9))?;
-    print!("{}", question);
-    stdout.flush()?;
-
+fn prompt_number(ui: &mut dyn Ui, title: &str, question: &str) -> io::Result<Option<String>> {
     let mut input = String::new();
-    stdout.execute(cursor::Show)?;
     loop {
-        if let Event::Key(key) = event::read()? {
+        ui.banner(title, question, &input)?;
+        if let Event::Key(key) = ui.read()? {
             if is_ctrl_c(&key) {
                 return Ok(None);
             }
             match key.code {
-                KeyCode::Char(c) if c.is_ascii_digit() => {
-                    input.push(c);
-                    print!("{}", c);
-                    stdout.flush()?;
-                }
-                KeyCode::Enter => break,
-                KeyCode::Backspace if !input.is_empty() => {
+                KeyCode::Char(c) if c.is_ascii_digit() => input.push(c),
+                KeyCode::Enter => return Ok(Some(input)),
+                KeyCode::Backspace => {
                     input.pop();
-                    print!("\x08 \x08");
-                    stdout.flush()?;
                 }
                 _ => {}
             }
         }
     }
-    stdout.execute(cursor::Hide)?;
-    Ok(Some(input))
 }
 
 /// Loads or creates the game and asks the startup questions.
-/// `None` means the player backed out with Ctrl-C (or the save could not be loaded).
-fn start_session(opts: Options) -> io::Result<Option<(Session, i32)>> {
+/// `None` means the player backed out with Ctrl-C. A save that can't be loaded is an
+/// error carrying the reason.
+pub(crate) fn start_session(opts: Options, mut ui: Box<dyn Ui>) -> io::Result<Option<(Session, i32)>> {
     let mut preloaded_game = None;
     if let Some(filename) = opts.load_file {
         match Game::load_game(&filename) {
             Ok(loaded_game) => preloaded_game = Some(loaded_game),
             Err(reason) => {
-                TerminalGuard::restore(); // leave the alternate screen so the message stays visible
-                eprintln!("Failed to load save file: {}", reason);
-                return Ok(None);
+                return Err(io::Error::other(format!("failed to load save file: {}", reason)));
             }
         }
     }
@@ -331,7 +313,7 @@ fn start_session(opts: Options) -> io::Result<Option<(Session, i32)>> {
         let question = format!("Choose a difficulty level where 0 is easy and {} is hard: ", levels - 1);
         let mut title = String::from("Welcome to rs empire (Rust Port of VMS-empire)");
         let level = loop {
-            match prompt_number(&title, &question)? {
+            match prompt_number(ui.as_mut(), &title, &question)? {
                 Some(s) => match s.trim().parse::<usize>() {
                     Ok(n) if n < levels => break n,
                     _ => title = format!("Please enter an integer in the range 0..{}.", levels - 1),
@@ -343,25 +325,23 @@ fn start_session(opts: Options) -> io::Result<Option<(Session, i32)>> {
         new_game = Some(g);
     }
 
-    let autosave_interval: i32 = match prompt_number("Autosave Configuration", "Enter autosave interval in turns (0 = Disabled): ")? {
+    let autosave_interval: i32 = match prompt_number(ui.as_mut(), "Autosave Configuration", "Enter autosave interval in turns (0 = Disabled): ")? {
         Some(s) => s.trim().parse().unwrap_or(0),
         None => return Ok(None),
     };
 
-    io::stdout().execute(terminal::Clear(ClearType::All))?;
-
     let session = if let Some(mut game) = preloaded_game {
         game.log(String::from("Game loaded from command line."));
-        Session { game, view: View::default() }
+        Session::new(game, ui)
     } else {
         let game = new_game.expect("a new game was made above");
-        let mut session = Session { game, view: View::default() };
+        let mut session = Session::new(game, ui);
         let starting_cities: Vec<usize> = session.game.cities.iter().enumerate()
             .filter(|(_, ct)| ct.owner == Owner::Player)
             .map(|(i, _)| i)
             .collect();
         for idx in starting_cities {
-            session.prompt_city_production(idx, true);
+            session.prompt_city_production(idx, true)?;
         }
         session
     };
@@ -371,11 +351,8 @@ fn start_session(opts: Options) -> io::Result<Option<(Session, i32)>> {
 /// One iteration of the map editor: draw, then handle at most one mouse/key event.
 /// Returns `Ok(true)` if the player chose to quit the whole program.
 fn edit_mode_step(s: &mut Session) -> io::Result<bool> {
-    s.draw("[Arrows/NumPad] Move | [P]rod | [O]rders | [W]ake | e[X]ject | [I]nitial Orders | [E]xit Edit: ");
-    if !event::poll(POLL).unwrap_or(false) {
-        return Ok(false);
-    }
-    let Ok(ev) = event::read() else { return Ok(false) };
+    s.draw("[Arrows/NumPad] Move | [P]rod | [O]rders | [W]ake | [I]nitial Orders | [E]xit Edit: ")?;
+    let Some(ev) = s.next_event(POLL)? else { return Ok(false) };
     if let Event::Mouse(mouse) = ev {
         let fallback = s.view.cursor;
         s.handle_mouse(mouse, fallback);
@@ -383,25 +360,25 @@ fn edit_mode_step(s: &mut Session) -> io::Result<bool> {
     let Event::Key(key) = ev else { return Ok(false) };
     s.view.center = None;
     if is_ctrl_c(&key) {
-        return Ok(s.confirm_quit());
+        return s.confirm_quit();
     }
     let cursor = s.view.cursor;
     match key.code {
         KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Esc => {
             s.view.mode = GameMode::Manual;
             s.game.log(String::from("Exited Edit Mode."));
-            drain_input();
+            s.ui.drain();
         }
         KeyCode::Char('p') | KeyCode::Char('P') => {
             match s.game.cities.iter().position(|c| c.loc == cursor && c.owner == Owner::Player) {
-                Some(c_idx) => s.prompt_city_production(c_idx, false),
+                Some(c_idx) => s.prompt_city_production(c_idx, false)?,
                 None => s.game.log(String::from("No player-owned city at cursor location.")),
             }
         }
         KeyCode::Char('w') | KeyCode::Char('W') => {
             // Some(None) = every type ('*').
             let prompt = format!("Wake units at cursor: {} or [*]All: ", PIECE_KEYS);
-            match s.pick(&prompt, |c| if c == '*' { Some(None) } else { keys::piece_for_key(c).map(Some) }) {
+            match s.pick(&prompt, |c| if c == '*' { Some(None) } else { keys::piece_for_key(c).map(Some) })? {
                 Some(only) => {
                     let woke = s.game.wake_units_at(cursor, only);
                     if woke > 0 {
@@ -413,18 +390,13 @@ fn edit_mode_step(s: &mut Session) -> io::Result<bool> {
                 None => s.game.log(String::from("Wake cancelled.")),
             }
         }
-        KeyCode::Char('x') | KeyCode::Char('X') => {
-            if !s.game.launch_cargo_at(cursor) {
-                s.game.log(String::from("No transports/carriers with cargo at cursor."));
-            }
-        }
         KeyCode::Char('o') | KeyCode::Char('O') => {
             let unit = s.game.pieces.iter()
                 .position(|p| p.loc == cursor && p.owner == Owner::Player && p.hits > 0 && p.ptype != PieceType::Satellite);
             match unit {
                 Some(p_idx) => {
                     let ptype = s.game.pieces[p_idx].ptype;
-                    match s.pick_order(ptype, &format!("Order {:?}", ptype), cursor, GameMode::Edit) {
+                    match s.pick_order(ptype, &format!("Order {:?}", ptype), cursor, GameMode::Edit)? {
                         Some(act) => {
                             s.game.pieces[p_idx].activity = act;
                             s.game.log(format!("Order applied manually to {:?} at cursor.", ptype));
@@ -435,7 +407,7 @@ fn edit_mode_step(s: &mut Session) -> io::Result<bool> {
                 None => s.game.log(String::from("No player unit at cursor location.")),
             }
         }
-        KeyCode::Char('i') | KeyCode::Char('I') => edit_standing_orders(s, cursor),
+        KeyCode::Char('i') | KeyCode::Char('I') => edit_standing_orders(s, cursor)?,
         code => {
             if let Some((dr, dc)) = keys::dir_for_key(code) {
                 s.view.cursor = s.game.shift_cursor(cursor, dr, dc);
@@ -447,7 +419,7 @@ fn edit_mode_step(s: &mut Session) -> io::Result<bool> {
 
 /// Edit mode `I`: set the standing order for new units, in the city at the cursor or
 /// globally.
-fn edit_standing_orders(s: &mut Session, cursor: Loc) {
+fn edit_standing_orders(s: &mut Session, cursor: Loc) -> io::Result<()> {
     let city = s.game.cities.iter().position(|c| c.loc == cursor && c.owner == Owner::Player);
     // Some(None) = the player said no.
     let scope = match city {
@@ -455,28 +427,29 @@ fn edit_standing_orders(s: &mut Session, cursor: Loc) {
             'l' => Some(Some(OrderScope::City(c_idx))),
             'g' => Some(Some(OrderScope::Global)),
             _ => None,
-        }),
+        })?,
         None => s.pick("No city here. Edit [G]lobal Fallback? (Y/N): ", |c| match c.to_ascii_lowercase() {
             'y' | 'g' => Some(Some(OrderScope::Global)),
             'n' => Some(None),
             _ => None,
-        }),
+        })?,
     };
     let Some(Some(scope)) = scope else {
         s.game.log(String::from("Order update cancelled."));
-        return;
+        return Ok(());
     };
     let scope_name = if scope == OrderScope::Global { "GLOBAL" } else { "LOCAL" };
-    let Some(ptype) = s.pick(&format!("{} Order? {}: ", scope_name, PIECE_KEYS), keys::piece_for_key) else {
+    let Some(ptype) = s.pick(&format!("{} Order? {}: ", scope_name, PIECE_KEYS), keys::piece_for_key)? else {
         s.game.log(String::from("Order update cancelled."));
-        return;
+        return Ok(());
     };
-    match s.pick_order(ptype, &format!("{} Order for {:?}", scope_name, ptype), cursor, GameMode::Edit) {
+    match s.pick_order(ptype, &format!("{} Order for {:?}", scope_name, ptype), cursor, GameMode::Edit)? {
         Some(act) => {
             s.game.set_standing_order(scope, ptype, act);
         }
         None => s.game.log(String::from("Order update cancelled.")),
     }
+    Ok(())
 }
 
 const ACTION_PROMPT: &str = "[N]ext, [A]utomove, [M]anual, [S]ave, [L]oad, [Q]uit: ";
@@ -498,16 +471,17 @@ enum Flow {
 }
 
 /// A unit that needs manual input: idle, or on standing orders but stuck with moves left.
-fn awaiting_manual(p: &Piece) -> bool {
+pub(crate) fn awaiting_manual(p: &Piece) -> bool {
     if p.owner != Owner::Player || p.moves_left <= 0 || p.hits <= 0 { return false; }
     if p.ptype == PieceType::Satellite { return false; } // satellites fly themselves
     matches!(p.activity, UnitActivity::Idle | UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dir(_, _) | UnitActivity::Dest(_) | UnitActivity::Land)
 }
 
-/// Saves to `empire_auto.sav` once per configured interval of turns.
-fn autosave_if_due(game: &mut Game, interval: i32, last_autosaved_turn: &mut i32) {
+/// Saves to the autosave file once per configured interval of turns.
+fn autosave_if_due(s: &mut Session, interval: i32, last_autosaved_turn: &mut i32) {
+    let game = &mut s.game;
     if interval > 0 && game.turn > 0 && game.turn % interval == 0 && game.turn != *last_autosaved_turn {
-        match game.save_game("empire_auto.sav") {
+        match game.save_game(&s.autosave_file) {
             Ok(()) => game.log(format!("Autosaved game at turn {}.", game.turn)),
             Err(e) => game.log(format!("AUTOSAVE FAILED at turn {}: {}", game.turn, e)),
         }
@@ -516,24 +490,23 @@ fn autosave_if_due(game: &mut Game, interval: i32, last_autosaved_turn: &mut i32
 }
 
 /// Dev observer mode: the player is skipped and the computer plays on until the player cancels.
-fn observer_step(s: &mut Session, observer_mode: &mut bool) {
+fn observer_step(s: &mut Session, observer_mode: &mut bool) -> io::Result<()> {
     for p in s.game.pieces.iter_mut() {
         if p.owner == Owner::Player {
             p.moves_left = 0;
         }
     }
     s.game.process_turn();
-    s.draw("[DEV OBSERVER MODE] Computer playing. Press 'O' or 'ESC' to cancel...");
-    if event::poll(POLL).unwrap_or(false) {
-        if let Ok(Event::Key(key)) = event::read() {
-            if matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Esc) {
-                *observer_mode = false;
-                s.view.mode = GameMode::Manual;
-                s.game.log(String::from("Exited Dev Observer Mode."));
-                drain_input();
-            }
+    s.draw("[DEV OBSERVER MODE] Computer playing. Press 'O' or 'ESC' to cancel...")?;
+    if let Some(Event::Key(key)) = s.next_event(POLL)? {
+        if matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Esc) {
+            *observer_mode = false;
+            s.view.mode = GameMode::Manual;
+            s.game.log(String::from("Exited Dev Observer Mode."));
+            s.ui.drain();
         }
     }
+    Ok(())
 }
 
 /// Advances units that are filling a transport or waiting for one.
@@ -562,11 +535,10 @@ fn auto_step(s: &mut Session) -> io::Result<Flow> {
     }
     s.game.process_turn();
     let prompt = action_prompt(&s.game);
-    s.draw(prompt);
-    std::thread::sleep(AUTO_TURN_PAUSE);
+    s.draw(prompt)?;
+    s.ui.pause(AUTO_TURN_PAUSE);
 
-    if event::poll(POLL).unwrap_or(false) {
-        let ev = event::read()?;
+    if let Some(ev) = s.next_event(POLL)? {
         if let Event::Mouse(mouse) = ev {
             let home = view::home(&s.game);
             s.handle_mouse(mouse, home);
@@ -574,11 +546,11 @@ fn auto_step(s: &mut Session) -> io::Result<Flow> {
         if let Event::Key(key) = ev {
             s.view.center = None;
             if is_ctrl_c(&key) {
-                return Ok(if s.confirm_quit() { Flow::Quit } else { Flow::Continue });
+                return Ok(if s.confirm_quit()? { Flow::Quit } else { Flow::Continue });
             }
             if let KeyCode::Char(ch) = key.code {
                 match ch.to_ascii_lowercase() {
-                    'q' => return Ok(if s.confirm_quit() { Flow::Quit } else { Flow::Continue }),
+                    'q' => return Ok(if s.confirm_quit()? { Flow::Quit } else { Flow::Continue }),
                     'o' | 'm' => {
                         s.view.mode = GameMode::Manual;
                         s.game.log(String::from("Manual move mode engaged (Auto interrupted)."));
@@ -595,17 +567,17 @@ fn auto_step(s: &mut Session) -> io::Result<Flow> {
 /// Moves the unit at `piece_idx` one square in direction `dir`, after the original's
 /// "are you sure?" for a move that would destroy it, and a warning if a fighter would be
 /// left without fuel to get home.
-fn move_unit(s: &mut Session, piece_idx: usize, dir: (i32, i32)) {
+fn move_unit(s: &mut Session, piece_idx: usize, dir: (i32, i32)) -> io::Result<()> {
     let (ptype, loc) = (s.game.pieces[piece_idx].ptype, s.game.pieces[piece_idx].loc);
     let Some(target) = s.game.step(loc, dir) else {
         s.game.log(String::from("Cannot move off the edge of the world."));
-        return;
+        return Ok(());
     };
     if let Some(prompt) = s.game.suicidal_move_prompt(ptype, Owner::Player, target) {
-        if !s.ask_yes_no(prompt) {
+        if !s.ask_yes_no(prompt)? {
             s.game.log(String::from("Move cancelled."));
-            drain_input();
-            return;
+            s.ui.drain();
+            return Ok(());
         }
     }
     if ptype == PieceType::Fighter {
@@ -613,10 +585,10 @@ fn move_unit(s: &mut Session, piece_idx: usize, dir: (i32, i32)) {
             let remaining_fuel = s.game.pieces[piece_idx].fuel - 1;
             if remaining_fuel < dist {
                 let prompt = format!("WARNING: Move leaves {} fuel, but base is {} away. Crash imminent! Proceed? [Y/N]: ", remaining_fuel, dist);
-                if !s.ask_yes_no(&prompt) {
+                if !s.ask_yes_no(&prompt)? {
                     s.game.log(String::from("Fighter move cancelled due to fuel warning."));
-                    drain_input();
-                    return;
+                    s.ui.drain();
+                    return Ok(());
                 }
             }
         }
@@ -626,23 +598,16 @@ fn move_unit(s: &mut Session, piece_idx: usize, dir: (i32, i32)) {
         s.game.log(msg);
     }
     if let MoveResult::CityCaptured(c_idx) = result {
-        s.prompt_city_production(c_idx, true);
+        s.prompt_city_production(c_idx, true)?;
     }
+    Ok(())
 }
 
-/// Asks the player for orders for one unit and carries them out.
-/// Returns `Ok(true)` if the player quit the program.
-fn manual_move(s: &mut Session, piece_idx: usize, mut was_auto: bool, observer_mode: &mut bool) -> io::Result<bool> {
-    let unit = &s.game.pieces[piece_idx];
-    let (ptype, loc, moves) = (unit.ptype, unit.loc, unit.moves_left);
-
+/// The order prompt for a unit, listing every key that applies to it.
+pub(crate) fn unit_prompt(unit: &Piece) -> String {
+    let ptype = unit.ptype;
     let mut opts = vec!["[789/46/123] move"];
     opts.extend(keys::order_menu(ptype));
-    if ptype.cargo_type().is_some() {
-        // e[X]ject sits after [F]ill
-        let at = opts.iter().position(|o| *o == "[F]ill").map_or(opts.len(), |i| i + 1);
-        opts.insert(at, "e[X]ject");
-    }
     let stuck = match unit.activity {
         UnitActivity::Dir(_, _) => " [STUCK: Dir]",
         UnitActivity::Dest(_) => " [STUCK: Dest]",
@@ -652,22 +617,28 @@ fn manual_move(s: &mut Session, piece_idx: usize, mut was_auto: bool, observer_m
         UnitActivity::Land => " [STUCK: Land]",
         _ => "",
     };
-    let move_prompt = format!("[{:?} at ({},{}) M:{}{}]: {}: ", ptype, loc.r, loc.c, moves, stuck, opts.join(","));
+    format!("[{:?} at ({},{}) M:{}{}]: {}: ", ptype, unit.loc.r, unit.loc.c, unit.moves_left, stuck, opts.join(","))
+}
+
+/// Asks the player for orders for one unit and carries them out.
+/// Returns `Ok(true)` if the player quit the program.
+fn manual_move(s: &mut Session, piece_idx: usize, mut was_auto: bool, observer_mode: &mut bool) -> io::Result<bool> {
+    let unit = &s.game.pieces[piece_idx];
+    let (ptype, loc) = (unit.ptype, unit.loc);
+    let move_prompt = unit_prompt(unit);
 
     let since = Instant::now();
     loop {
-        s.draw_blinking(&move_prompt, (loc, blink_on(since)));
-        if !event::poll(POLL).unwrap_or(false) {
-            continue;
-        }
-        let ev = event::read()?;
+        let blink = s.ui.blink_on(since);
+        s.draw_blinking(&move_prompt, (loc, blink))?;
+        let Some(ev) = s.next_event(POLL)? else { continue };
         if let Event::Mouse(mouse) = ev {
             s.handle_mouse(mouse, loc);
         }
         let Event::Key(key) = ev else { continue };
         s.view.center = None;
         if is_ctrl_c(&key) {
-            if s.confirm_quit() {
+            if s.confirm_quit()? {
                 return Ok(true);
             }
             continue;
@@ -675,7 +646,7 @@ fn manual_move(s: &mut Session, piece_idx: usize, mut was_auto: bool, observer_m
         let KeyCode::Char(ch) = key.code else { continue };
 
         if let Some(dir) = keys::dir_for_digit(ch) {
-            move_unit(s, piece_idx, dir);
+            move_unit(s, piece_idx, dir)?;
             break;
         }
         match ch.to_ascii_lowercase() {
@@ -685,31 +656,25 @@ fn manual_move(s: &mut Session, piece_idx: usize, mut was_auto: bool, observer_m
                 s.game.pieces[piece_idx].moves_left = 0;
                 s.game.order_unit(piece_idx, UnitActivity::TransportWait);
             }
+            // On a transport or carrier this also brings up whatever is asleep in the hold.
             'w' => s.game.wake_unit(piece_idx),
-            'x' => {
-                if s.game.pieces[piece_idx].cargo.is_empty() {
-                    s.game.log(String::from("No cargo to eject/launch."));
-                    continue;
-                }
-                s.game.wake_cargo(piece_idx);
-            }
             'd' => {
                 let prompt = format!("Pick target for {:?} - [Arrows/NumPad] Move | [Enter] Confirm | [Esc] Cancel: ", ptype);
-                match s.pick_location(&prompt, loc, GameMode::PickDest(piece_idx)) {
+                match s.pick_location(&prompt, loc, GameMode::PickDest(piece_idx))? {
                     Some(dest) => s.game.order_unit(piece_idx, UnitActivity::Dest(dest)),
                     None => s.game.log(String::from("Destination selection cancelled.")),
                 }
-                drain_input();
+                s.ui.drain();
             }
             'v' => {
-                match s.pick_direction(ptype) {
+                match s.pick_direction(ptype)? {
                     Some((dr, dc)) => s.game.order_unit(piece_idx, UnitActivity::Dir(dr, dc)),
                     None => s.game.log(String::from("March order cancelled.")),
                 }
-                drain_input();
+                s.ui.drain();
             }
             'q' => {
-                if s.confirm_quit() {
+                if s.confirm_quit()? {
                     return Ok(true);
                 }
             }
@@ -734,7 +699,7 @@ fn manual_move(s: &mut Session, piece_idx: usize, mut was_auto: bool, observer_m
                 s.view.cursor = loc;
                 was_auto = false;
                 s.game.log(String::from("Edit Mode engaged."));
-                drain_input();
+                s.ui.drain();
             }
             c => {
                 // y/g/r/f/l/u: an order carried out at once (s, t, w, d and v are above)
@@ -756,11 +721,8 @@ fn manual_move(s: &mut Session, piece_idx: usize, mut was_auto: bool, observer_m
 /// Returns `Ok(true)` if the player quit the program.
 fn idle_input(s: &mut Session, observer_mode: &mut bool) -> io::Result<bool> {
     let prompt = action_prompt(&s.game);
-    s.draw(prompt);
-    if !event::poll(IDLE_POLL).unwrap_or(false) {
-        return Ok(false);
-    }
-    let ev = event::read()?;
+    s.draw(prompt)?;
+    let Some(ev) = s.next_event(IDLE_POLL)? else { return Ok(false) };
     if let Event::Mouse(mouse) = ev {
         let home = view::home(&s.game);
         s.handle_mouse(mouse, home);
@@ -768,11 +730,11 @@ fn idle_input(s: &mut Session, observer_mode: &mut bool) -> io::Result<bool> {
     let Event::Key(key) = ev else { return Ok(false) };
     s.view.center = None;
     if is_ctrl_c(&key) {
-        return Ok(s.confirm_quit());
+        return s.confirm_quit();
     }
     let KeyCode::Char(ch) = key.code else { return Ok(false) };
     match ch.to_ascii_lowercase() {
-        'q' => return Ok(s.confirm_quit()),
+        'q' => return s.confirm_quit(),
         'n' => s.game.process_turn(),
         '`' | '~' if cfg!(debug_assertions) => s.game.reveal_entire_map(),
         'z' if cfg!(debug_assertions) => {
@@ -791,11 +753,17 @@ fn idle_input(s: &mut Session, observer_mode: &mut bool) -> io::Result<bool> {
             s.view.mode = GameMode::Edit;
             s.view.cursor = view::home(&s.game);
             s.game.log(String::from("Edit Mode engaged."));
-            drain_input();
+            s.ui.drain();
         }
-        's' => match s.game.save_game("empire.sav") {
-            Ok(()) => s.game.log(String::from("Game saved to empire.sav.")),
-            Err(e) => s.game.log(format!("SAVE FAILED: could not write empire.sav: {}", e)),
+        's' => match s.game.save_game(&s.save_file) {
+            Ok(()) => {
+                let msg = format!("Game saved to {}.", s.save_file);
+                s.game.log(msg);
+            }
+            Err(e) => {
+                let msg = format!("SAVE FAILED: could not write {}: {}", s.save_file, e);
+                s.game.log(msg);
+            }
         },
         'v' if s.game.comp_resigned => {
             s.view.show_comp_view = !s.view.show_comp_view;
@@ -805,11 +773,12 @@ fn idle_input(s: &mut Session, observer_mode: &mut bool) -> io::Result<bool> {
                 "Back to your own map."
             }));
         }
-        'l' => match Game::load_game("empire.sav") {
+        'l' => match Game::load_game(&s.save_file) {
             Ok(loaded) => {
                 s.game = loaded;
                 s.view = View::default();
-                s.game.log(String::from("Game loaded from empire.sav."));
+                let msg = format!("Game loaded from {}.", s.save_file);
+                s.game.log(msg);
             }
             Err(reason) => s.game.log(format!("LOAD FAILED: {}", reason)),
         },
@@ -819,31 +788,30 @@ fn idle_input(s: &mut Session, observer_mode: &mut bool) -> io::Result<bool> {
 }
 
 /// Shows the final message until a key is pressed.
-fn game_over(s: &mut Session, msg: String) {
+fn game_over(s: &mut Session, msg: String) -> io::Result<()> {
     s.game.log(msg);
-    s.draw(" GAME OVER! Press any key to exit... ");
-    read_key();
+    s.draw(" GAME OVER! Press any key to exit... ")?;
+    s.read_key()?;
+    Ok(())
 }
 
-/// The main input/turn loop.
-fn play(mut s: Session, autosave_interval: i32) -> io::Result<()> {
+/// The main input/turn loop. Returns when the player quits or the game ends.
+pub(crate) fn play(s: &mut Session, autosave_interval: i32) -> io::Result<()> {
     let mut last_autosaved_turn = 0;
     let mut observer_mode = false;
     let prompt = action_prompt(&s.game);
-    s.draw(prompt);
+    s.draw(prompt)?;
 
     loop {
-        autosave_if_due(&mut s.game, autosave_interval, &mut last_autosaved_turn);
+        autosave_if_due(s, autosave_interval, &mut last_autosaved_turn);
 
         if let Some(msg) = s.game.check_game_over() {
-            game_over(&mut s, msg);
-            return Ok(());
+            return game_over(s, msg);
         }
 
         if s.game.comp_should_resign() && !observer_mode {
-            if !s.ask_yes_no("The computer acknowledges defeat. Do you wish to smash the rest of the enemy? [Y/N]: ") {
-                game_over(&mut s, String::from(">>> VICTORY! The computer acknowledges defeat. <<<"));
-                return Ok(());
+            if !s.ask_yes_no("The computer acknowledges defeat. Do you wish to smash the rest of the enemy? [Y/N]: ")? {
+                return game_over(s, String::from(">>> VICTORY! The computer acknowledges defeat. <<<"));
             }
             s.game.comp_resigned = true;
             s.game.log(String::from("The enemy inadvertently revealed its code used for receiving battle information."));
@@ -855,18 +823,18 @@ fn play(mut s: Session, autosave_interval: i32) -> io::Result<()> {
             if observer_mode {
                 s.game.set_production(c_idx, PieceType::Army, true);
             } else {
-                s.prompt_city_production(c_idx, true);
+                s.prompt_city_production(c_idx, true)?;
             }
             continue;
         }
 
         if observer_mode {
-            observer_step(&mut s, &mut observer_mode);
+            observer_step(s, &mut observer_mode)?;
             continue;
         }
 
         if s.view.mode == GameMode::Edit {
-            if edit_mode_step(&mut s)? {
+            if edit_mode_step(s)? {
                 return Ok(());
             }
             continue;
@@ -876,7 +844,7 @@ fn play(mut s: Session, autosave_interval: i32) -> io::Result<()> {
 
         let was_auto = s.view.mode == GameMode::Auto;
         if was_auto {
-            match auto_step(&mut s)? {
+            match auto_step(s)? {
                 Flow::Quit => return Ok(()),
                 Flow::Continue => continue,
                 Flow::Proceed => {}
@@ -884,13 +852,13 @@ fn play(mut s: Session, autosave_interval: i32) -> io::Result<()> {
         }
 
         if let Some(piece_idx) = s.game.pieces.iter().position(awaiting_manual) {
-            if manual_move(&mut s, piece_idx, was_auto, &mut observer_mode)? {
+            if manual_move(s, piece_idx, was_auto, &mut observer_mode)? {
                 return Ok(());
             }
             continue;
         }
 
-        if idle_input(&mut s, &mut observer_mode)? {
+        if idle_input(s, &mut observer_mode)? {
             return Ok(());
         }
     }
