@@ -10,9 +10,10 @@ rules of movement, combat and production, and a faithful translation of the orig
 computer player. It adds a modern terminal interface (panels, a scrollable message
 log, mouse support) and a short list of quality-of-life changes, all listed below.
 
-**Status: 0.9.0-beta.** The game rules and the computer player are covered by an
-automated test suite and by thousands of simulated AI-vs-AI games. The terminal
-interface has had less testing, so please report anything that looks wrong.
+**Status: 0.9.0-beta.** The game rules, the computer player and the terminal
+interface are covered by automated tests (including random-input fuzzing of the
+interface), and by thousands of simulated AI-vs-AI games. It's a beta while it gets
+real-world play: please report anything that looks wrong.
 
 - Player manual: [docs/MANUAL.md](docs/MANUAL.md)
 - Developer guide: [docs/DEVELOPING.md](docs/DEVELOPING.md)
@@ -22,9 +23,7 @@ interface has had less testing, so please report anything that looks wrong.
 ## Building
 
 You need a Rust toolchain (stable; 1.74 or newer should work). The game runs in an
-80 × 24 terminal, but 120 columns or more is recommended: a wider window shows more
-of the 60 × 100 map and the full list of keys on the prompt line (see
-[Known issues](CHANGELOG.md#known-issues)).
+80 × 24 terminal; a larger one shows more of the 60 × 100 map.
 
 ```
 git clone https://github.com/tymrek/rusted-empire.git
@@ -108,6 +107,10 @@ The rules follow VMS-Empire 1.13. These are the deliberate changes:
 - **Destroyers detect submarines up to 4 squares away.** In the original, submarines
   are seen only when next to something.
 - **Carriers count as bases** for fighter fuel and range warnings.
+- **Armies aboard a transport sleep until it arrives.** They come up for orders when
+  the transport finishes a standing order next to land (or when you wake it with `W`),
+  so a loaded transport can sail along a coast without asking about its troops every
+  turn. In the original, they are asked whenever the transport is next to land.
 - **Starting continents must have an open-ocean port**, so neither side can be stuck
   on a continent whose only coast is a lake.
 - Cities are placed at a fixed minimum spacing, close to the original's derived value.
