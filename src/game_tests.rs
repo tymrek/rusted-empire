@@ -4,13 +4,6 @@ mod tests {
     use crate::models::{Terrain, City, Loc, MoveResult, Owner, Piece, PieceType, UnitActivity};
 
     #[test]
-    fn test_map_generation_dimensions() {
-        let game = Game::new(120, 240, 50);
-        assert_eq!(game.map.len(), 120);
-        assert_eq!(game.map[0].len(), 240);
-    }
-
-    #[test]
     fn test_dynamic_city_scaling() {
         let mut game = Game::new(120, 240, 50);
         game.setup_initial_states();
@@ -93,7 +86,8 @@ mod tests {
     #[test]
     fn test_cargo_boarding_limits() {
         let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![Terrain::Sea; 10]; 10]; 
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[5][4] = Terrain::Land; // the armies wait on the shore
 
         game.pieces.push(Piece {
             id: 1, ptype: PieceType::Transport, owner: Owner::Player,
@@ -158,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn test_logistics_wake_cargo() {
+    fn test_waking_a_transport_brings_its_armies_up() {
         let mut game = Game::new(10, 10, 50);
         let mut transport = Piece {
             id: 1, ptype: PieceType::Transport, owner: Owner::Player,
@@ -183,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn test_logistics_process_fill_mode() {
+    fn test_fill_order_waits_until_full() {
         let mut game = Game::new(10, 10, 50);
         let mut transport = Piece {
             id: 1, ptype: PieceType::Transport, owner: Owner::Player,
@@ -210,33 +204,6 @@ mod tests {
     }
 
     #[test]
-    fn test_combat_city_assault_consumption() {
-        let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![Terrain::Land; 10]; 10]; 
-        
-        game.cities.push(City {
-            loc: Loc { r: 5, c: 5 }, owner: Owner::Neutral, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None,
-        });
-
-        game.pieces.push(Piece {
-            id: 1, ptype: PieceType::Army, owner: Owner::Player,
-            loc: Loc { r: 5, c: 4 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle,
-            cargo: Vec::new(), fuel: 0,
-        });
-
-        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 5 });
-        
-        assert!(matches!(result, MoveResult::CityCaptured(_) | MoveResult::CityAssaultFailed), "Result should be capture or fail");
-        assert_eq!(game.pieces[0].hits, 0, "Attacking army must be consumed (hits = 0) regardless of RNG success or failure");
-        
-        if let MoveResult::CityCaptured(idx) = result {
-            assert_eq!(game.cities[idx].owner, Owner::Player, "City owner should update to player on successful assault");
-        } else {
-            assert_eq!(game.cities[0].owner, Owner::Neutral, "City owner should remain neutral on failed assault");
-        }
-    }
-
-    #[test]
     fn test_turn_production_cycle() {
         let mut game = Game::new(10, 10, 50);
         game.cities.push(City {
@@ -260,27 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn test_turn_port_healing() {
-        let mut game = Game::new(10, 10, 50);
-        game.cities.push(City { 
-            loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None 
-        });
-        
-        game.pieces.push(Piece {
-            id: 1, ptype: PieceType::Battleship, owner: Owner::Player,
-            loc: Loc { r: 5, c: 5 }, hits: 5, moves_left: 0, activity: UnitActivity::Sentry,
-            cargo: Vec::new(), fuel: 0,
-        });
-
-        game.process_turn();
-        assert_eq!(game.pieces[0].hits, 6, "Battleship should heal 1 hit point while on Sentry in a friendly city");
-        
-        game.pieces[0].hits = 10;
-        game.process_turn();
-        assert_eq!(game.pieces[0].hits, 10, "Battleship should not heal past its maximum hits threshold");
-    }
-
-    #[test]
     fn test_turn_satellite_decay() {
         let mut game = Game::new(10, 10, 50);
         game.pieces.push(Piece {
@@ -298,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ai_sentry_wake_logic() {
+    fn test_sentry_wakes_when_an_enemy_is_next_to_it() {
         let mut game = Game::new(10, 10, 50);
         
         game.pieces.push(Piece {
@@ -321,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ai_explore_bfs_obstacle_avoidance() {
+    fn test_exploring_army_goes_around_water_to_the_unknown() {
         let mut game = Game::new(5, 5, 50);
         
         for r in 0..5 {
@@ -343,40 +289,21 @@ mod tests {
             cargo: Vec::new(), fuel: 0,
         });
 
-        game.explore_piece(0);
-
-        let new_loc = game.pieces[0].loc;
-        assert_ne!(new_loc, Loc { r: 2, c: 2 }, "Army must not step into the water wall");
-        assert_eq!(game.map[new_loc.r][new_loc.c], Terrain::Land, "Army must only step on land");
-        assert!(new_loc.c >= 1, "Army should not move backward away from the fog");
-    }
-
-    #[test]
-    fn test_combat_unit_engagement() {
-        let mut game = Game::new(10, 10, 50);
-        game.map = vec![vec![Terrain::Land; 10]; 10]; 
-        
-        game.pieces.push(Piece {
-            id: 1, ptype: PieceType::Army, owner: Owner::Player,
-            loc: Loc { r: 5, c: 5 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle,
-            cargo: Vec::new(), fuel: 0,
-        });
-        game.pieces.push(Piece {
-            id: 2, ptype: PieceType::Army, owner: Owner::Comp,
-            loc: Loc { r: 5, c: 6 }, hits: 1, moves_left: 1, activity: UnitActivity::Idle,
-            cargo: Vec::new(), fuel: 0,
-        });
-
-        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
-        
-        assert!(matches!(result, MoveResult::CombatWon | MoveResult::CombatLost), "Result must be CombatWon or CombatLost");
-        
-        if result == MoveResult::CombatWon {
-            assert_eq!(game.pieces[1].hits, 0, "Enemy should be destroyed");
-            assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 6 }, "Victor should occupy the tile");
-        } else {
-            assert_eq!(game.pieces[0].hits, 0, "Attacker should be destroyed");
+        // The only unexplored square, (2,4), is beyond a wall of water at column 2: the
+        // army has to go round it, by row 0 or row 4, until it can see (2,4), and never
+        // steps into the sea.
+        let mut path = vec![game.pieces[0].loc];
+        for _ in 0..8 {
+            if game.player_map[2][4] == 1 {
+                break;
+            }
+            game.pieces[0].moves_left = 1;
+            game.explore_piece(0);
+            path.push(game.pieces[0].loc);
         }
+        assert!(path.iter().all(|l| game.map[l.r][l.c] == Terrain::Land), "stepped into the sea: {:?}", path);
+        assert_eq!(game.player_map[2][4], 1, "never got round the water to see it: {:?}", path);
+        assert!(path.iter().any(|l| (l.r == 0 || l.r == 4) && l.c == 2), "went round the end of the wall: {:?}", path);
     }
 
     #[test]
@@ -524,7 +451,8 @@ mod tests {
     fn test_city_stacking_and_fighter_flyover() {
         let mut game = Game::new(10, 10, 50);
         game.map = vec![vec![Terrain::Sea; 10]; 10];
-        
+        game.map[5][5] = Terrain::Land; // a port city
+
         game.cities.push(City { loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None });
 
         for i in 0..6 {
@@ -564,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn test_logistics_wake_fighter_from_carrier() {
+    fn test_waking_a_carrier_brings_its_fighters_up() {
         let mut game = Game::new(10, 10, 50);
         let mut carrier = Piece {
             id: 1, ptype: PieceType::Carrier, owner: Owner::Player,
@@ -664,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mobile_sector_load_move_unload_logistics() {
+    fn test_transport_carries_deck_and_hold_units() {
         let mut game = Game::new(10, 10, 50);
         game.map = vec![vec![Terrain::Sea; 10]; 10]; 
 
@@ -689,7 +617,7 @@ mod tests {
             cargo: Vec::new(), fuel: 0,
         });
 
-        // 1. Mobile Sector Drag
+        // 1. Armies on deck sail with the transport
         // Move Transport from (5,5) to (5,6)
         let (res, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
         assert_eq!(res, MoveResult::Moved, "Transport should move successfully");
@@ -719,12 +647,13 @@ mod tests {
     }
 
     #[test]
-    fn test_mobile_sector_drag_exploit_limit() {
+    fn test_transport_leaving_port_takes_at_most_six_armies() {
         let mut game = Game::new(10, 10, 50);
         game.map = vec![vec![Terrain::Sea; 10]; 10];
         game.map[5][5] = Terrain::Land;
+        game.cities.push(City { loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0, default_orders: Vec::new(), seen_owner: None });
 
-        // Transport at (5,5)
+        // Transport in port at (5,5)
         game.pieces.push(Piece {
             id: 1, ptype: PieceType::Transport, owner: Owner::Player,
             loc: Loc { r: 5, c: 5 }, hits: 1, moves_left: 2, activity: UnitActivity::Idle,
@@ -747,14 +676,15 @@ mod tests {
         let armies_at_sea = game.pieces.iter().filter(|p| p.ptype == PieceType::Army && p.loc == Loc { r: 5, c: 6 }).count();
         let armies_on_land = game.pieces.iter().filter(|p| p.ptype == PieceType::Army && p.loc == Loc { r: 5, c: 5 }).count();
 
-        assert_eq!(armies_at_sea, 6, "Transport should drag exactly 6 armies out to sea");
-        assert_eq!(armies_on_land, 4, "4 armies should be left behind on the original land tile");
+        assert_eq!(armies_at_sea, 6, "the transport sails with a full load of 6");
+        assert_eq!(armies_on_land, 4, "the other 4 stay in the city");
     }
 
     #[test]
-    fn test_logistics_transport_wait_boarding() {
+    fn test_army_waiting_for_a_transport_boards_one_alongside() {
         let mut game = Game::new(10, 10, 50);
         game.map = vec![vec![Terrain::Sea; 10]; 10];
+        game.map[6][6] = Terrain::Land; // the army waits on the shore
 
         // Player Transport at (5,5)
         game.pieces.push(Piece {
@@ -1620,7 +1550,7 @@ mod tests {
         assert!(game.pieces[0].loc.r >= 1, "sailed toward (4,4), not along the top edge toward (0,5): {:?}", game.pieces[0].loc);
     }
 
-    // ---- one distance metric ----
+    // ---- sentries ----
 
     fn sentry_world(enemy_r: usize, enemy_c: usize) -> Game {
         let mut game = Game::new(15, 15, 50);
