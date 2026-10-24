@@ -2,7 +2,49 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
-## 0.9.0-beta (unreleased)
+## 0.9.1-beta (2026-10-24)
+
+Bug fixes found in play, the new interface tests, and simpler handling
+of units aboard ships.
+
+### Fixed
+- **Fighters low on fuel stalled in the air for good.** A fighter on an automatic order
+  (explore, attack, destination, vector, land) that reached bingo fuel was given a
+  course home but no moves that turn; the next turn the fuel check, seeing it still
+  low, cancelled the course and sent it "home" again. It never moved, so it never
+  landed (and, burning no fuel, never crashed). Now it flies home at once with the
+  moves it has left, a fighter already headed for a base is never turned back, and one
+  that can't reach any base wakes up and asks for orders, as in the original. Fighters
+  already stuck in a saved game recover on the next turn.
+- **The edit-mode cursor vanished in unexplored territory** (and on the enemy's map):
+  it was only drawn on squares you had explored. It now always shows, and the
+  edit-mode panel gives its position.
+- The prompt line was cut off on narrow terminals: at 80 columns a unit's prompt lost
+  its last keys (for an army, `[V]ctr`, `[W]ake`, `[T]rnsWait`). Long prompts now wrap
+  onto the second prompt line.
+- A save given to `--load` that can't be read now exits with an error status, with the
+  reason printed after the terminal is restored.
+
+### Changed
+- **No more eject.** The separate `X` (eject/launch) key duplicated `W` and is gone,
+  from both the unit prompt and edit mode. `W` on a transport or carrier brings up
+  everything aboard.
+- **Armies aboard come up when their transport arrives.** When a transport carrying
+  sleeping armies finishes a standing order (or gets stuck) next to land, its armies
+  come up on deck for orders. Sailing along a coast, or moving the transport by hand,
+  leaves them asleep. Fighters on carriers still wait for `W`.
+- All of the front end's input and output goes through a `Ui` trait (`ui.rs`), which
+  is what makes the interface testable, and is the seam a network client will use.
+- The repository now has a `.gitignore` and tracks `Cargo.lock`, so release builds use
+  exactly the dependency versions that were tested.
+
+### Added
+- **Automated interface tests**: screen tests on an in-memory terminal, scripted tests
+  that drive every prompt of the real front end, random-input fuzz tests that fail on
+  any crash, hang or unsavable game, and an end-to-end test of the binary in a
+  pseudo-terminal (`tools/tui_smoke.py`).
+
+## 0.9.0-beta (2026-10-23)
 
 First public beta. The rules and the computer player are complete and match
 VMS-Empire 1.13, apart from the deliberate differences listed in the README. The
@@ -15,42 +57,11 @@ terminal interface still needs wider testing before 1.0.
 - Headless rig: mirror matches, where the same AI code plays both sides on full-size
   worlds. The default difficulty is the fairest level that puts the two sides on
   different continents. New options: `--small`, `--level`, `--turns`, `--stalemate`.
-- **Automated interface tests**: screen tests on an in-memory terminal, scripted tests
-  that drive every prompt of the real front end, random-input fuzz tests that fail on
-  any crash, hang or unsavable game, and an end-to-end test of the binary in a
-  pseudo-terminal (`tools/tui_smoke.py`).
 - Headless rig rule experiments: `--original-sight` and `--adjacent-subs` restore the
   original rules for sight and for submarine detection, to measure what this port's
   changes do.
 
-### Changed
-- **No more eject.** The separate `X` (eject/launch) key duplicated `W` and is gone,
-  from both the unit prompt and edit mode. `W` on a transport or carrier brings up
-  everything aboard.
-- **Armies aboard come up when their transport arrives.** When a transport carrying
-  sleeping armies finishes a standing order (or gets stuck) next to land, its armies
-  come up on deck for orders. Sailing along a coast, or moving the transport by hand,
-  leaves them asleep. Fighters on carriers still wait for `W`.
-- All of the front end's input and output goes through a `Ui` trait (`ui.rs`), which
-  is what makes the interface testable, and is the seam a network client will use.
-
 ### Fixed
-- **The edit-mode cursor vanished in unexplored territory** (and on the enemy's map):
-  it was only drawn on squares you had explored. It now always shows, and the
-  edit-mode panel gives its position.
-- **Fighters low on fuel stalled in the air for good.** A fighter on an automatic order
-  (explore, attack, destination, vector, land) that reached bingo fuel was given a
-  course home but no moves that turn; the next turn the fuel check, seeing it still
-  low, cancelled the course and sent it "home" again. It never moved, so it never
-  landed (and, burning no fuel, never crashed). Now it flies home at once with the
-  moves it has left, a fighter already headed for a base is never turned back, and one
-  that can't reach any base wakes up and asks for orders, as in the original. Fighters
-  already stuck in a saved game recover on the next turn.
-- The prompt line was cut off on narrow terminals: at 80 columns a unit's prompt lost
-  its last keys (for an army, `[V]ctr`, `[W]ake`, `[T]rnsWait`). Long prompts now wrap
-  onto the second prompt line.
-- A save given to `--load` that can't be read now exits with an error status, with the
-  reason printed after the terminal is restored.
 - Saves from the very first builds of the port, which predate scoring, failed to load
   ("not a valid save file"). Every save format the project has had now loads; this
   was checked with real saves written by each old build.

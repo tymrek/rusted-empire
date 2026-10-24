@@ -10,7 +10,7 @@ rules of movement, combat and production, and a faithful translation of the orig
 computer player. It adds a modern terminal interface (panels, a scrollable message
 log, mouse support) and a short list of quality-of-life changes, all listed below.
 
-**Status: 0.9.0-beta.** The game rules, the computer player and the terminal
+**Status: 0.9.1-beta.** The game rules, the computer player and the terminal
 interface are covered by automated tests (including random-input fuzzing of the
 interface), and by thousands of simulated AI-vs-AI games. It's a beta while it gets
 real-world play: please report anything that looks wrong.
