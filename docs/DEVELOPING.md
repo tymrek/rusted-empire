@@ -2,7 +2,7 @@
 
 This guide is for anyone changing the code: how it is organised, how a turn runs,
 where the original VMS-Empire C code went, how saves are versioned, and how to test.
-It describes 0.9.0-beta.
+It describes 0.9.1-beta.
 
 ## Project goals
 

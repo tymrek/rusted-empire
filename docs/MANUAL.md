@@ -1,6 +1,6 @@
 # rusted-empire player manual
 
-This manual covers how to play rusted-empire 0.9.0-beta. The rules are those of
+This manual covers how to play rusted-empire 0.9.1-beta. The rules are those of
 VMS-Empire; where this port differs, the text says so. The README lists all the
 differences in one place.
 
