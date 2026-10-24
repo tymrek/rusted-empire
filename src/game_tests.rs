@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fighter_grope_bingo_fuel_return() {
+    fn test_fighter_on_grope_flies_home_at_bingo_fuel() {
         let mut game = Game::new(10, 20, 50);
         game.map = vec![vec![Terrain::Sea; 20]; 10];
         
@@ -807,17 +807,12 @@ mod tests {
         game.pieces.push(fighter);
         
         game.explore_piece(0);
-        
-        assert_eq!(game.pieces[0].activity, UnitActivity::Land, "Fighter should abort grope and switch to Land when hitting bingo fuel");
-        assert_eq!(game.pieces[0].moves_left, 0, "Fighter should halt its current movement to process the return order");
-        
-        game.process_land_mode(0);
-        
-        if let UnitActivity::Dest(dest_loc) = game.pieces[0].activity {
-            assert_eq!(dest_loc, Loc { r: 5, c: 5 }, "Fighter should target the nearest base to land");
-        } else {
-            panic!("Fighter activity should be Dest(base)");
-        }
+
+        // It gives up the grope and flies home at once, with the moves it has left: the
+        // base is 6 away and it has 8 moves, so it lands this turn.
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 5 }, "flew straight home");
+        assert_eq!(game.pieces[0].fuel, crate::game::FIGHTER_FUEL, "and refuelled on landing");
+        assert!(game.messages.iter().any(|m| m.contains("bingo fuel")));
     }
 
     fn test_piece(id: usize, ptype: PieceType, owner: Owner, r: usize, c: usize) -> Piece {
@@ -1518,6 +1513,57 @@ mod tests {
     }
 
     /// Two own cities where Euclidean and move-distance disagree about which is nearer:
+    /// A fighter at (5,15) over open sea with `fuel` left and `activity`, and the
+    /// player's only city 14 squares west at (5,1).
+    fn long_way_home(activity: UnitActivity, fuel: i32) -> Game {
+        let mut game = Game::with_seed(10, 30, 0, 1);
+        game.map = vec![vec![Terrain::Sea; 30]; 10];
+        game.map[5][1] = Terrain::Land;
+        game.player_map = vec![vec![1; 30]; 10];
+        game.cities.push(City { loc: Loc { r: 5, c: 1 }, owner: Owner::Player, prod: PieceType::Army, work: -100, default_orders: Vec::new(), seen_owner: None });
+        let mut f = test_piece(1, PieceType::Fighter, Owner::Player, 5, 15);
+        f.activity = activity;
+        f.fuel = fuel;
+        game.pieces.push(f);
+        game
+    }
+
+    #[test]
+    fn test_low_fuel_fighters_on_any_order_make_it_home() {
+        // Regression: at bingo fuel, "land" became "go to base" with no moves that turn,
+        // and the next turn's fuel check turned it back into "land": the fighter hung in
+        // the air for ever, never moving and never burning fuel.
+        for order in [UnitActivity::Explore, UnitActivity::Attack, UnitActivity::Land, UnitActivity::Dest(Loc { r: 5, c: 1 }), UnitActivity::Dir(0, 1)] {
+            let mut game = long_way_home(order, 15);
+            for _ in 0..3 {
+                game.process_turn();
+            }
+            let f = game.pieces.iter().find(|p| p.id == 1).unwrap_or_else(|| panic!("{:?}: the fighter was lost", order));
+            assert_eq!(f.loc, Loc { r: 5, c: 1 }, "{:?}: should have landed at the city", order);
+            assert_eq!(f.fuel, crate::game::FIGHTER_FUEL, "{:?}: refuelled", order);
+        }
+    }
+
+    #[test]
+    fn test_fighter_sent_home_keeps_flying_on_low_fuel() {
+        // A fighter heading for a base is never "turned back for home".
+        let mut game = long_way_home(UnitActivity::Dest(Loc { r: 5, c: 1 }), 15);
+        game.dest_piece(0);
+        assert_eq!(game.pieces[0].moves_left, 0, "used all its moves");
+        assert_eq!(game.dist(game.pieces[0].loc, Loc { r: 5, c: 1 }), 6, "8 squares closer");
+        assert_eq!(game.pieces[0].activity, UnitActivity::Dest(Loc { r: 5, c: 1 }));
+    }
+
+    #[test]
+    fn test_fighter_that_cannot_reach_a_base_asks_for_orders() {
+        // As the original's move_land: out of reach, the fighter wakes up for the player.
+        let mut game = long_way_home(UnitActivity::Land, 5);
+        game.process_land_mode(0);
+        assert_eq!(game.pieces[0].activity, UnitActivity::Idle);
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 15 }, "it does not fly off to crash");
+        assert!(game.messages.iter().any(|m| m.contains("can't reach a base")));
+    }
+
     /// (0,5) is 5 moves from the origin (distance^2 25); (4,4) is 4 moves (distance^2 32).
     fn two_city_world() -> Game {
         let mut game = Game::new(10, 10, 50);
@@ -1536,7 +1582,7 @@ mod tests {
         fighter.fuel = 20;
         game.pieces.push(fighter);
         game.process_land_mode(0);
-        assert_eq!(game.pieces[0].activity, UnitActivity::Dest(Loc { r: 4, c: 4 }));
+        assert_eq!(game.pieces[0].loc, Loc { r: 4, c: 4 }, "landed at the city 4 moves away, not the one 5 away");
     }
 
     #[test]

@@ -1288,10 +1288,9 @@ impl Game {
             if ptype == PieceType::Fighter {
                 if let Some(dist) = self.dist_to_nearest_base(current_loc) {
                     if self.pieces[piece_idx].fuel <= dist + 2 {
-                        self.pieces[piece_idx].activity = UnitActivity::Land;
-                        self.pieces[piece_idx].moves_left = 0;
                         explore_logs.push(format!("Fighter at ({},{}) reached bingo fuel ({} left). Aborting grope and returning to base.", current_loc.r, current_loc.c, self.pieces[piece_idx].fuel));
-                        break; 
+                        self.fighter_heads_home(piece_idx);
+                        break;
                     }
                 }
             }
@@ -1692,10 +1691,9 @@ impl Game {
             if ptype == PieceType::Fighter {
                 if let Some(dist) = self.dist_to_nearest_base(current_loc) {
                     if self.pieces[piece_idx].fuel <= dist + 2 {
-                        self.pieces[piece_idx].activity = UnitActivity::Land;
                         attack_logs.push(format!("Fighter at ({},{}) reached bingo fuel. Aborting attack and returning to base.", current_loc.r, current_loc.c));
-                        self.process_land_mode(piece_idx);
-                        break; 
+                        self.fighter_heads_home(piece_idx);
+                        break;
                     }
                 }
             }
@@ -1874,12 +1872,16 @@ impl Game {
             let current_loc = self.pieces[piece_idx].loc;
             let ptype = self.pieces[piece_idx].ptype;
 
-            if ptype == PieceType::Fighter {
+            // A fighter low on fuel turns for home, unless it is already headed for a base
+            // (turning a fighter that is flying home "back for home" stalled it for good).
+            if ptype == PieceType::Fighter && !self.is_player_base(target_loc) {
                 if let Some(dist) = self.dist_to_nearest_base(current_loc) {
                     if self.pieces[piece_idx].fuel <= dist + 2 {
-                        self.pieces[piece_idx].activity = UnitActivity::Land;
-                        self.pieces[piece_idx].moves_left = 0;
                         dest_logs.push(format!("Fighter at ({},{}) reached bingo fuel. Route cancelled, returning to base.", current_loc.r, current_loc.c));
+                        for msg in dest_logs.drain(..) {
+                            self.log(msg);
+                        }
+                        self.fighter_heads_home(piece_idx);
                         break;
                     }
                 }
@@ -2002,9 +2004,8 @@ impl Game {
             if ptype == PieceType::Fighter {
                 if let Some(dist) = self.dist_to_nearest_base(current_loc) {
                     if self.pieces[piece_idx].fuel <= dist + 2 {
-                        self.pieces[piece_idx].activity = UnitActivity::Land;
-                        self.pieces[piece_idx].moves_left = 0;
                         dir_logs.push(format!("Fighter at ({},{}) reached bingo fuel. March halted, returning to base.", current_loc.r, current_loc.c));
+                        self.fighter_heads_home(piece_idx);
                         break;
                     }
                 }
@@ -2565,25 +2566,39 @@ impl Game {
             }
         }
         
-        if valid_targets.is_empty() {
-            self.log(String::from("Fighter has no available bases or carriers to land on!"));
-            self.pieces[piece_idx].moves_left = 0;
-            return;
-        }
-        
-        let mut closest_loc = valid_targets[0];
-        let mut min_dist = self.dist(p_loc, closest_loc);
-        
-        for &loc in &valid_targets[1..] {
-            let dist = self.dist(p_loc, loc);
-            if dist < min_dist {
-                min_dist = dist;
-                closest_loc = loc;
+        // As the original's `move_land`: fly to the nearest city or carrier if it is within
+        // the fighter's fuel, straight away with the moves it has left; if none is, wake
+        // the fighter so the player decides what to do with it.
+        let nearest = valid_targets.iter().copied().min_by_key(|&l| self.dist(p_loc, l));
+        match nearest {
+            Some(base) if self.dist(p_loc, base) <= self.pieces[piece_idx].fuel => {
+                self.pieces[piece_idx].activity = UnitActivity::Dest(base);
+                self.dest_piece(piece_idx);
+            }
+            Some(base) => {
+                self.pieces[piece_idx].activity = UnitActivity::Idle;
+                self.log(format!("Fighter at ({},{}) can't reach a base: the nearest is {} away and it has {} fuel left!",
+                    p_loc.r, p_loc.c, self.dist(p_loc, base), self.pieces[piece_idx].fuel));
+            }
+            None => {
+                self.pieces[piece_idx].activity = UnitActivity::Idle;
+                self.log(format!("Fighter at ({},{}) has no city or carrier to land on!", p_loc.r, p_loc.c));
             }
         }
-        
-        self.pieces[piece_idx].activity = UnitActivity::Dest(closest_loc);
-        self.pieces[piece_idx].moves_left = 0;
+    }
+
+    /// A fighter on a standing order that has reached bingo fuel gives it up and flies
+    /// home with the moves it has left (`process_land_mode`).
+    fn fighter_heads_home(&mut self, piece_idx: usize) {
+        self.pieces[piece_idx].activity = UnitActivity::Land;
+        self.process_land_mode(piece_idx);
+    }
+
+    /// True if `loc` is one of the player's cities, or has one of the player's carriers
+    /// on it: somewhere a fighter can land.
+    fn is_player_base(&self, loc: Loc) -> bool {
+        self.cities.iter().any(|c| c.loc == loc && c.owner == Owner::Player)
+            || self.pieces.iter().any(|p| p.loc == loc && p.owner == Owner::Player && p.hits > 0 && p.ptype == PieceType::Carrier)
     }
 
     /// True when the computer should acknowledge defeat, as in the original's
