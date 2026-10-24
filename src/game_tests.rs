@@ -2694,7 +2694,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wake_and_launch_commands() {
+    fn test_wake_commands() {
         let mut game = Game::with_seed(10, 10, 0, 1);
         let mut t = test_piece(1, PieceType::Transport, Owner::Player, 5, 5);
         t.cargo.push(test_piece(10, PieceType::Army, Owner::Player, 5, 5));
@@ -2703,9 +2703,99 @@ mod tests {
         game.pieces[1].activity = UnitActivity::Sentry;
         assert_eq!(game.wake_units_at(Loc { r: 5, c: 5 }, Some(PieceType::Destroyer)), 1);
         assert_eq!(game.pieces[0].cargo.len(), 1, "only destroyers were asked for");
-        assert!(game.launch_cargo_at(Loc { r: 5, c: 5 }));
-        assert!(game.pieces[0].cargo.is_empty());
-        assert!(!game.launch_cargo_at(Loc { r: 5, c: 5 }), "nothing left to launch");
+        game.pieces[0].activity = UnitActivity::Sentry;
+        assert_eq!(game.wake_units_at(Loc { r: 5, c: 5 }, None), 1, "* wakes the transport...");
+        assert!(game.pieces[0].cargo.is_empty(), "...and brings up its hold");
+        assert!(game.pieces.iter().any(|p| p.id == 10 && p.activity == UnitActivity::Idle));
+    }
+
+    /// A strip of sea along row 5 with land to the north (rows 0-3) and a transport at
+    /// (5, `col`) carrying two sleeping armies.
+    fn coast_world(col: usize) -> Game {
+        let mut game = Game::with_seed(10, 20, 0, 1);
+        game.map = vec![vec![Terrain::Sea; 20]; 10];
+        for r in 1..4 {
+            for c in 1..19 {
+                game.map[r][c] = Terrain::Land;
+            }
+        }
+        game.player_map = vec![vec![1; 20]; 10];
+        let mut t = test_piece(1, PieceType::Transport, Owner::Player, 5, col);
+        for id in [10, 11] {
+            let mut a = test_piece(id, PieceType::Army, Owner::Player, 5, col);
+            a.activity = UnitActivity::Sentry;
+            t.cargo.push(a);
+        }
+        game.pieces.push(t);
+        game
+    }
+
+    #[test]
+    fn test_transport_arriving_next_to_land_brings_its_armies_up() {
+        let mut game = coast_world(2);
+        // destination (4, 6): next to the land at (3, 6)
+        game.order_unit(0, UnitActivity::Dest(Loc { r: 4, c: 6 }));
+        let t = game.pieces.iter().find(|p| p.id == 1).unwrap();
+        assert_eq!(t.loc, Loc { r: 4, c: 4 }, "two moves along: still on the way");
+        assert_eq!(t.cargo.len(), 2, "the armies sleep while it sails, even along the coast");
+
+        game.process_turn();
+        let t = game.pieces.iter().find(|p| p.id == 1).unwrap();
+        assert_eq!(t.loc, Loc { r: 4, c: 6 });
+        assert!(t.cargo.is_empty(), "arrived: the hold is emptied");
+        let armies: Vec<_> = game.pieces.iter().filter(|p| p.ptype == PieceType::Army).collect();
+        assert_eq!(armies.len(), 2);
+        assert!(armies.iter().all(|a| a.loc == Loc { r: 4, c: 6 } && a.activity == UnitActivity::Idle && a.moves_left > 0),
+            "they are on deck, awake and ready to go ashore");
+        assert!(game.messages.iter().any(|m| m.contains("Transport arrived at (4,6)")));
+    }
+
+    #[test]
+    fn test_transport_arriving_at_open_sea_keeps_its_armies_asleep() {
+        let mut game = coast_world(2);
+        game.order_unit(0, UnitActivity::Dest(Loc { r: 8, c: 3 }));
+        game.process_turn();
+        let t = game.pieces.iter().find(|p| p.id == 1).unwrap();
+        assert_eq!(t.loc, Loc { r: 8, c: 3 });
+        assert_eq!(t.cargo.len(), 2, "nowhere to land, so nobody is woken");
+    }
+
+    #[test]
+    fn test_transport_moved_by_hand_along_the_coast_keeps_its_armies_asleep() {
+        let mut game = coast_world(2);
+        for c in 3..8 {
+            let i = game.pieces.iter().position(|p| p.id == 1).unwrap();
+            game.attempt_move(i, Loc { r: 4, c });
+            game.pieces[i].moves_left = 2;
+        }
+        let t = game.pieces.iter().find(|p| p.id == 1).unwrap();
+        assert_eq!(t.cargo.len(), 2, "moving by hand never wakes the hold");
+    }
+
+    #[test]
+    fn test_transport_stuck_next_to_land_brings_its_armies_up() {
+        let mut game = coast_world(2);
+        game.map[4][3] = Terrain::Land; // a headland blocks the way east along row 4
+        game.pieces[0].loc = Loc { r: 4, c: 2 };
+        game.order_unit(0, UnitActivity::Dir(0, 1));
+        let t = game.pieces.iter().find(|p| p.id == 1).unwrap();
+        assert!(t.cargo.is_empty(), "stuck with moves to spare counts as arriving");
+    }
+
+    #[test]
+    fn test_carriers_keep_their_fighters_until_woken() {
+        let mut game = coast_world(2);
+        game.pieces[0].ptype = PieceType::Carrier;
+        game.pieces[0].hits = PieceType::Carrier.max_hits();
+        for a in game.pieces[0].cargo.iter_mut() {
+            a.ptype = PieceType::Fighter;
+            a.fuel = crate::game::FIGHTER_FUEL;
+        }
+        game.order_unit(0, UnitActivity::Dest(Loc { r: 4, c: 4 }));
+        assert_eq!(game.pieces[0].cargo.len(), 2, "fighters are launched on purpose, not on arrival");
+        game.wake_unit(0);
+        assert!(game.pieces[0].cargo.is_empty(), "W on the carrier launches them");
+        assert_eq!(game.pieces.iter().filter(|p| p.ptype == PieceType::Fighter && p.activity == UnitActivity::Idle).count(), 2);
     }
 
     #[test]

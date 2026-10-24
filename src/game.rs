@@ -72,6 +72,20 @@ fn fresh_rng() -> StdRng {
     StdRng::from_entropy()
 }
 
+/// The RNG a loaded game continues with: freshly seeded, so reloading a save doesn't
+/// replay the same dice.
+#[cfg(not(test))]
+fn loaded_rng() -> StdRng {
+    fresh_rng()
+}
+
+/// In tests a loaded game's RNG is seeded with a fixed value, so that a test run (a fuzz
+/// run that presses `L`, say) can be repeated exactly.
+#[cfg(test)]
+fn loaded_rng() -> StdRng {
+    StdRng::seed_from_u64(0x5eed)
+}
+
 /// Version of the save-file format written by this build. Bump it whenever a change to
 /// `Game` can't be handled by a `#[serde(default)]` on the new field, and add a
 /// migration step to `Game::migrate`. Saves from before versioning count as version 0.
@@ -157,7 +171,7 @@ pub struct Game {
     /// Source of all randomness (map generation, combat, AI wiggle). Not saved:
     /// a loaded game gets a fresh entropy-seeded generator. Use `with_seed` /
     /// `seed_rng` to make a game reproducible.
-    #[serde(skip, default = "fresh_rng")]
+    #[serde(skip, default = "loaded_rng")]
     pub rng: StdRng,
     /// Ids of pieces that changed location since the last turn boundary. A damaged boat
     /// in its own port that did not move this turn repairs one hit, as in the original.
@@ -1570,19 +1584,29 @@ impl Game {
         self.move_satellites();
 
         for idx in auto_explore_indices {
+            let before = self.pieces[idx].activity;
             self.explore_piece(idx);
+            self.unload_on_arrival(idx, before);
         }
         for idx in auto_attack_indices {
+            let before = self.pieces[idx].activity;
             self.attack_piece(idx);
+            self.unload_on_arrival(idx, before);
         }
         for idx in auto_random_indices {
+            let before = self.pieces[idx].activity;
             self.random_piece(idx);
+            self.unload_on_arrival(idx, before);
         }
         for idx in auto_dest_indices {
+            let before = self.pieces[idx].activity;
             self.dest_piece(idx);
+            self.unload_on_arrival(idx, before);
         }
         for idx in auto_dir_indices {
+            let before = self.pieces[idx].activity;
             self.dir_piece(idx);
+            self.unload_on_arrival(idx, before);
         }
         for idx in auto_fill_indices {
             self.process_fill_mode(idx);
@@ -2275,7 +2299,8 @@ impl Game {
     /// Carries out the standing order the unit at `idx` has just been given, straight
     /// away (orders that only take effect at the next turn do nothing here).
     pub fn carry_out_order(&mut self, idx: usize) {
-        match self.pieces[idx].activity {
+        let before = self.pieces[idx].activity;
+        match before {
             UnitActivity::Explore => self.explore_piece(idx),
             UnitActivity::Attack => self.attack_piece(idx),
             UnitActivity::Random => self.random_piece(idx),
@@ -2286,6 +2311,7 @@ impl Game {
             UnitActivity::Land => self.process_land_mode(idx),
             _ => {}
         }
+        self.unload_on_arrival(idx, before);
     }
 
     /// Gives the player's unit at `idx` a standing order and carries it out at once (the
@@ -2371,21 +2397,6 @@ impl Game {
         woke
     }
 
-    /// Brings up the cargo of every player transport or carrier at `loc`. False if there
-    /// was none.
-    pub fn launch_cargo_at(&mut self, loc: Loc) -> bool {
-        let carriers: Vec<usize> = (0..self.pieces.len())
-            .filter(|&i| {
-                let p = &self.pieces[i];
-                p.loc == loc && p.owner == Owner::Player && p.hits > 0 && !p.cargo.is_empty()
-            })
-            .collect();
-        for &i in &carriers {
-            self.wake_cargo(i);
-        }
-        !carriers.is_empty()
-    }
-
     /// Sets the standing order new units of type `ptype` get (globally, or in one city),
     /// and gives it to units of that type already waiting in the cities concerned, which
     /// carry it out at once. A city's own order overrides the global one, so a global
@@ -2435,25 +2446,71 @@ impl Game {
         updated.len()
     }
 
-    pub fn wake_cargo(&mut self, piece_idx: usize) {
+    /// Brings the units sleeping in the hold of the transport or carrier at `piece_idx`
+    /// up on deck, awake and ready for orders. Returns how many came up.
+    ///
+    /// Units aboard live in two places: asleep in the hold (`Piece::cargo`), where the
+    /// move loop never asks about them, or awake on deck (ordinary pieces on the ship's
+    /// square, carried along by `drag_deck_cargo`). The hold empties when the player wakes
+    /// the ship (`W`), and for a transport's armies, when it arrives somewhere
+    /// (`unload_on_arrival`).
+    pub fn wake_cargo(&mut self, piece_idx: usize) -> usize {
         if self.pieces[piece_idx].cargo.is_empty() {
-            return;
+            return 0;
         }
-        
         let t_loc = self.pieces[piece_idx].loc;
         let mut awakened_units = Vec::new();
-        
-        // Mobile Sector Design: Waking cargo brings them out of the hold and onto the deck
-        // (the main pieces array) where they can receive normal sequential orders.
         for mut unit in self.pieces[piece_idx].cargo.drain(..) {
             unit.loc = t_loc;
-            unit.activity = UnitActivity::Idle; 
+            unit.activity = UnitActivity::Idle;
             unit.moves_left = unit.ptype.moves_for_hits(unit.hits);
             awakened_units.push(unit);
         }
-        
+        let n = awakened_units.len();
+        let what = self.pieces[piece_idx].ptype.cargo_type().map_or("unit", |t| if t == PieceType::Fighter { "fighter" } else { "army" });
         self.pieces.extend(awakened_units);
-        self.log(format!("{:?} at ({},{}) awakened its cargo onto the deck.", self.pieces[piece_idx].ptype, t_loc.r, t_loc.c));
+        self.log(format!("{:?} at ({},{}): {} {}{} up on deck for orders.", self.pieces[piece_idx].ptype, t_loc.r, t_loc.c,
+            n, if n == 1 { what.to_string() } else if what == "army" { "armies".to_string() } else { format!("{}s", what) },
+            if n == 1 { " is" } else { " are" }));
+        n
+    }
+
+    /// True if any square next to `loc`, or `loc` itself, is land: somewhere a transport's
+    /// armies could go ashore.
+    fn next_to_land(&self, loc: Loc) -> bool {
+        if self.map[loc.r][loc.c] == Terrain::Land {
+            return true;
+        }
+        (-1..=1).any(|dr| (-1..=1).any(|dc| {
+            (dr, dc) != (0, 0) && self.step(loc, (dr, dc)).is_some_and(|l| self.map[l.r][l.c] == Terrain::Land)
+        }))
+    }
+
+    /// After the player's unit at `idx` has carried out its standing order (it had
+    /// `before`): a transport that has arrived next to land brings its sleeping armies up
+    /// for orders. "Arrived" means its movement order (destination, vector, explore,
+    /// random, attack) is over, or it got stuck with moves to spare. A transport sailing
+    /// on (along a coast, say) or moved by hand leaves them asleep; `W` on the transport
+    /// brings them up at any time. (A quality-of-life change: the original asks about
+    /// armies aboard whenever their transport is next to land.)
+    fn unload_on_arrival(&mut self, idx: usize, before: UnitActivity) {
+        let Some(p) = self.pieces.get(idx) else { return };
+        if p.owner != Owner::Player || p.hits <= 0 || p.ptype != PieceType::Transport || p.cargo.is_empty() {
+            return;
+        }
+        let moving = |a: UnitActivity| matches!(a, UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dest(_) | UnitActivity::Dir(_, _));
+        if !moving(before) {
+            return;
+        }
+        // (A unit that reaches its destination on its last move only drops the order at its
+        // next move, so standing on the destination counts as arrived too.)
+        let at_dest = matches!(p.activity, UnitActivity::Dest(d) if d == p.loc);
+        let arrived = p.activity == UnitActivity::Idle || at_dest || (moving(p.activity) && p.moves_left > 0);
+        if arrived && self.next_to_land(p.loc) {
+            let loc = p.loc;
+            self.log(format!("Transport arrived at ({},{}).", loc.r, loc.c));
+            self.wake_cargo(idx);
+        }
     }
 
     pub fn process_land_mode(&mut self, piece_idx: usize) {
@@ -2647,7 +2704,7 @@ impl Game {
     }
 
     /// Cheap consistency checks so a damaged save fails to load instead of panicking later.
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         let grid_ok = |g: &Vec<Vec<u8>>| g.len() == self.rows && g.iter().all(|r| r.len() == self.cols);
         if self.rows == 0 || self.cols == 0
             || self.map.len() != self.rows || self.map.iter().any(|r| r.len() != self.cols)

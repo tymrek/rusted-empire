@@ -8,8 +8,8 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
-    Terminal,
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    Frame, Terminal,
 };
 type TuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
 
@@ -40,19 +40,31 @@ pub fn view_axes(game: &Game, center: Loc, view_height: usize, view_width: usize
     ((start_r..end_r).collect(), (start_c..end_c).collect())
 }
 
-/// Draws the whole screen: map, sidebar, message log, and `prompt` on the bottom line.
-pub fn refresh_display_with_input(game: &Game, view: &mut View, prompt: &str) {
-    refresh_display_with_input_blinking(game, view, prompt, None);
-}
-
-/// As `refresh_display_with_input`, with the square in `active_blink` highlighted and
-/// shown or hidden (the bool) so that it blinks between calls.
+/// Draws the whole screen on the real terminal: map, sidebar, message log, and `prompt`
+/// on the bottom lines, with the square in `active_blink` highlighted and shown or hidden
+/// (the bool) so that it blinks between calls.
 pub fn refresh_display_with_input_blinking(game: &Game, view: &mut View, prompt: &str, active_blink: Option<(Loc, bool)>) {
     view.follow_messages(game);
     let view = &*view;
     let mut terminal = get_terminal();
+    terminal.draw(|f| render(f, game, view, prompt, active_blink)).unwrap();
 
-    terminal.draw(|f| {
+    #[cfg(debug_assertions)]
+        {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open("ai_metrics.csv") {
+                let comp_cities = game.cities.iter().filter(|c| c.owner == Owner::Comp).count();
+                let comp_units = game.pieces.iter().filter(|p| p.owner == Owner::Comp && p.hits > 0).count();
+                let _ = writeln!(file, "{},{},{}", game.turn, comp_cities, comp_units);
+            }
+        }
+}
+
+/// Draws one frame of the game screen onto `f`, whatever the backend (the real terminal,
+/// or an in-memory one in tests). The caller brings the view's message scroll up to date
+/// first (`View::follow_messages`).
+pub fn render(f: &mut Frame, game: &Game, view: &View, prompt: &str, active_blink: Option<(Loc, bool)>) {
+    {
         let size = f.size();
         
         f.render_widget(Clear, size);
@@ -345,18 +357,11 @@ let mut sidebar_lines = vec![
         let msg_widget = Paragraph::new(msg_lines)
             .block(Block::default().borders(Borders::ALL).title(msg_title));
         f.render_widget(msg_widget, msg_area);
+        // The prompt area has two lines: a long prompt (a unit's full list of orders)
+        // wraps onto the second instead of being cut off on a narrow terminal.
         let prompt_widget = Paragraph::new(prompt)
+            .wrap(Wrap { trim: false })
             .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
         f.render_widget(prompt_widget, prompt_area);
-    }).unwrap();
-
-    #[cfg(debug_assertions)]
-        {
-            use std::io::Write;
-            if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open("ai_metrics.csv") {
-                let comp_cities = game.cities.iter().filter(|c| c.owner == Owner::Comp).count();
-                let comp_units = game.pieces.iter().filter(|p| p.owner == Owner::Comp && p.hits > 0).count();
-                let _ = writeln!(file, "{},{},{}", game.turn, comp_cities, comp_units);
-            }
-        }
+    }
 }
