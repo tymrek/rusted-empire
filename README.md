@@ -22,7 +22,7 @@ real-world play: please report anything that looks wrong.
 
 ## Building
 
-You need a Rust toolchain (stable; 1.74 or newer should work). The game runs in an
+You need Rust 1.75 or newer. The game runs in an
 80 × 24 terminal; a larger one shows more of the 60 × 100 map.
 
 ```
