@@ -25,12 +25,15 @@ python3 tools/tui_smoke.py  # end to end, needs `pip install pyte` and a release
 cargo clippy
 ```
 
-**Toolchain compatibility.** The maintainer builds with a Rust toolchain older than
-1.87. Don't use standard-library APIs newer than about Rust 1.74 without checking.
+**Toolchain compatibility.** The minimum supported Rust is **1.75**, the version
+releases are built with (`rust-version` in `Cargo.toml`). Don't use standard-library
+APIs newer than 1.75 without checking.
 Known traps: `is_multiple_of` (1.87) and `Option::is_none_or` (1.82). `cargo clippy
 --fix` on a newer toolchain can introduce these by itself, so always build and test on
 the oldest toolchain you support before sending a change. Dependencies are pinned
-(`ratatui = "=0.26.0"`, `crossterm = "=0.27.0"`) for the same reason.
+(`ratatui = "=0.26.0"`, `crossterm = "=0.27.0"`) for the same reason. Keep `Cargo.lock`
+in format 3 (`version = 3` at the top): Cargo 1.78 and later rewrite it to format 4,
+which 1.75 can't read, so check the lock file's diff before committing.
 
 ## Source map
 
