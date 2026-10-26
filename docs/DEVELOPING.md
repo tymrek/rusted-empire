@@ -2,7 +2,26 @@
 
 This guide is for anyone changing the code: how it is organised, how a turn runs,
 where the original VMS-Empire C code went, how saves are versioned, and how to test.
-It describes 0.9.1-beta.
+It describes 2.0.0-alpha.1, the start of the 2.0 line (see [Release lines](#release-lines)).
+
+## Release lines
+
+There are two lines, on two long-lived branches:
+
+| Line | Branch | Versions | What goes there |
+|---|---|---|---|
+| Original | `main` | `1.0.0`, then `1.0.1`, `1.0.2`… | Bug fixes only. Stays true to VMS-Empire: original behaviour stays, even when odd. |
+| 2.0 | `2.0` | `2.0.0-alpha.N` → `2.0.0-beta.N` → `2.0.0` | Everything that departs from the original, starting with the client/server split. |
+
+- A bug fix goes to `main` (a pull request against `main`), and `main` is merged into
+  `2.0` from time to time, so fixes reach both lines.
+- 2.0 work goes in pull requests against `2.0`. Nothing from `2.0` is merged into
+  `main`.
+- Versions follow semantic versioning: alpha while features are still landing, beta
+  once they are frozen, then the stable release.
+
+The goals below are the 1.x line's. On `2.0`, goal 1 no longer binds: departures from
+the original are the point, but they should still be deliberate and written down.
 
 ## Project goals
 
@@ -12,8 +31,8 @@ It describes 0.9.1-beta.
 2. **Quality-of-life changes are explicit.** Every intended difference from the
    original is listed in the README under "Differences from the original". A change to
    the rules goes on that list, or it is a bug.
-3. **Ready for a client/server split.** A fork is planned that separates the game
-   (server) from the terminal front end (client). Keep the game logic free of screen
+3. **Ready for a client/server split.** The 2.0 line separates the game (server)
+   from the terminal front end (client). Keep the game logic free of screen
    and input code; see [The client/server seam](#the-clientserver-seam).
 
 ## Building and testing

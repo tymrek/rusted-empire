@@ -2,6 +2,12 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## 2.0.0-alpha.1 (unreleased)
+
+The start of the 2.0 line, on the `2.0` branch: the version of rusted-empire that
+departs from the original, beginning with a client/server split. The original-faithful
+line continues on `main` as 1.0.x. So far the game is the same as 0.9.1-beta.
+
 ## 0.9.1-beta (2026-10-24)
 
 Bug fixes found in play, the new interface tests, and simpler handling
