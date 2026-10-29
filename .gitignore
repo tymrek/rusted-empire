@@ -1,5 +1,6 @@
-cat > .gitignore <<'EOF'
 /target
+/web/target
+/web/www/pkg
 *.orig
 *.rej
 *.sav
@@ -7,4 +8,3 @@ cat > .gitignore <<'EOF'
 *.patch
 playtest_metrics.csv
 ai_metrics.csv
-EOF

@@ -2650,7 +2650,7 @@ impl Game {
     /// disk part-way through never destroys an existing good save.
     pub fn save_game(&self, filename: &str) -> std::io::Result<()> {
         use std::io::Write;
-        let data = serde_json::to_string(self).map_err(std::io::Error::other)?;
+        let data = self.to_save_string()?;
         let tmp = format!("{}.tmp", filename);
         let result = (|| {
             let mut file = std::fs::File::create(&tmp)?;
@@ -2670,7 +2670,20 @@ impl Game {
     pub fn load_game(filename: &str) -> Result<Self, String> {
         let data = std::fs::read_to_string(filename)
             .map_err(|e| format!("could not read {}: {}", filename, e))?;
-        let mut game: Game = serde_json::from_str(&data)
+        Self::from_save_string(&data, filename)
+    }
+
+    /// The game as save-file text (what `save_game` writes).
+    pub fn to_save_string(&self) -> std::io::Result<String> {
+        serde_json::to_string(self).map_err(std::io::Error::other)
+    }
+
+    /// A game from save-file text (what `load_game` reads); `name` says where it came from
+    /// in error messages. Checks the version, brings older saves up to date and rejects
+    /// damaged ones, as `load_game` does.
+    pub fn from_save_string(data: &str, name: &str) -> Result<Self, String> {
+        let filename = name;
+        let mut game: Game = serde_json::from_str(data)
             .map_err(|e| format!("{} is not a valid save file ({})", filename, e))?;
         if game.save_version > SAVE_VERSION {
             return Err(format!(

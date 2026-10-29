@@ -53,6 +53,8 @@ which 1.75 can't read, so check the lock file's diff before committing.
 | `game_tests.rs` | ~2700 | Rule tests, regression tests, save-format tests. |
 | `tui_tests.rs` | ~800 | Interface tests: screen, scripted and fuzz (see [Interface tests](#interface-tests)). |
 | `tools/tui_smoke.py` | | End-to-end test of the binary in a pseudo-terminal. |
+| `web/` | | The browser build (wasm branch): see [The browser build](#the-browser-build). |
+| `tools/web_smoke.py`, `tools/web_serve.py` | | The browser build's end-to-end test, and a local web server for it. |
 
 ## Architecture
 
@@ -331,6 +333,61 @@ call `play(&mut s)` (false means the script ran out, true means the game ended o
 player quit), then assert on `s.game`, `s.view` and `ui.screen()` (`.prompt`,
 `.text()`, `.at(x, y)`). Prompts show their keys, so a test reads like a player at
 the keyboard.
+
+## The browser build
+
+The `wasm` branch adds a web version in `web/`. It compiles the game's own `src/` files
+to WebAssembly unchanged, with a browser front end in place of the terminal. It is
+a separate package, so the terminal program's dependencies, its `Cargo.lock` and its
+Rust 1.75 minimum are untouched.
+
+```
+web/
+  Cargo.toml        the browser package: ../src modules via #[path], plus web.rs
+  build.sh          cargo build --target wasm32-unknown-unknown, then wasm-bindgen
+  src/lib.rs        declares the shared modules (no terminal, no headless rig)
+  src/web.rs        WebUi: the Ui trait for the browser, and the run() entry point
+  crossterm-shim/   crossterm's event types (KeyEvent, MouseEvent ...) without the
+                    terminal, so the shared code compiles unchanged
+  www/              the page: index.html, main.js (screen, keyboard, mouse, saves),
+                    worker.js (runs the game), bridge.js (the calls web.rs imports),
+                    coi-sw.js (see below)
+```
+
+**How it runs.** `app.rs` blocks waiting for input, which a browser page can't do. So
+the game runs in a Web Worker, and the page and the worker share a ring buffer of input
+events in a `SharedArrayBuffer`. `WebUi::poll` and `read` block on it with
+`Atomics.wait`, just where the terminal version blocks on the keyboard. Every frame is
+drawn with `disp::render` into a ratatui `TestBackend` and posted to the page, but
+only when it changed. The page paints it on a canvas and draws the box-drawing
+characters as lines. Saves go through `Ui::write_save` and `read_save` to local
+storage (`Game::to_save_string` and `from_save_string`).
+
+**Shared memory needs a "cross-origin isolated" page**, which normally means two
+response headers. GitHub Pages can't send headers, so `coi-sw.js` is a small service
+worker that adds them; on the first visit the page registers it and reloads once.
+`tools/web_serve.py` sends the headers itself, for local testing.
+
+**Keeping the shared code buildable for the web:**
+- No `std::time::Instant::now()` in the front end: use `crate::ui::Instant`, which is
+  the browser's clock on the web.
+- No file access from the game loop: saves go through the `Ui`.
+- Terminal-only code goes behind `#[cfg(not(target_arch = "wasm32"))]`, as `TermUi`,
+  `run()` and the real-terminal parts of `disp.rs` are now.
+- Only crossterm's event types are available on the web (`web/crossterm-shim`).
+
+**Testing.** `tools/web_smoke.py` serves the build, drives it in headless Chromium
+with Playwright, and reads the screen back through the page's `rsEmpireScreenText()`.
+It covers startup, orders, edit mode, saving to and loading from local storage across
+a reload, the mouse, resizing and quitting. CI (`.github/workflows/web.yml`) runs it
+on every push and pull request to `wasm`.
+
+**Publishing.** Every push to `wasm` builds and tests the page and publishes it to
+GitHub Pages. That needs a one-time setting: Settings → Pages → Source: GitHub
+Actions.
+
+**Merging.** `main` is merged into `wasm` like into `2.0`. The changes in `src/` are a
+handful of `cfg` lines and the `Ui` save methods, so 1.x fixes merge cleanly.
 
 ## Performance
 

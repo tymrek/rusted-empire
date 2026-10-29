@@ -5,18 +5,33 @@
 //! terminal directly. `TermUi` is the real terminal. Tests use a scripted `Ui` that
 //! feeds key sequences and draws into an in-memory screen (see `tui_tests.rs`), and a
 //! network client for the planned client/server split would be one more implementation.
+//!
+//! In the browser build (`web/`) there is no terminal: `TermUi` is left out, and the
+//! browser's `WebUi` takes its place.
+#[cfg(not(target_arch = "wasm32"))]
 use crate::disp;
 use crate::game::Game;
 use crate::models::Loc;
 use crate::view::View;
+use crossterm::event::Event;
+#[cfg(not(target_arch = "wasm32"))]
 use crossterm::{
     cursor,
-    event::{self, Event},
+    event,
     terminal::{self, ClearType},
     ExecutableCommand,
 };
-use std::io::{self, Write};
-use std::time::{Duration, Instant};
+use std::io;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Write;
+use std::time::Duration;
+
+/// A point in time, for blinking. The standard library's clock doesn't exist in the
+/// browser, so the web build brings its own.
+#[cfg(not(target_arch = "wasm32"))]
+pub use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+pub use crate::web::Instant;
 
 /// Half a blink cycle for the unit or city being asked about.
 const BLINK_MS: u128 = 300;
@@ -39,20 +54,32 @@ pub trait Ui {
     fn blink_on(&self, since: Instant) -> bool {
         (since.elapsed().as_millis() / BLINK_MS) & 1 == 0
     }
+    /// Saves `game` under `name`: a file, unless the front end keeps saves elsewhere
+    /// (the browser keeps them in local storage).
+    fn write_save(&mut self, name: &str, game: &Game) -> io::Result<()> {
+        game.save_game(name)
+    }
+    /// Loads the save called `name` (see `write_save`).
+    fn read_save(&mut self, name: &str) -> Result<Game, String> {
+        Game::load_game(name)
+    }
 }
 
 /// The real terminal (crossterm input, ratatui output).
+#[cfg(not(target_arch = "wasm32"))]
 pub struct TermUi {
     /// True while a startup banner is on screen: the next game draw clears it first.
     in_banner: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl TermUi {
     pub fn new() -> Self {
         TermUi { in_banner: false }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Ui for TermUi {
     fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
         event::poll(timeout)

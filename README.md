@@ -54,6 +54,26 @@ terminals that crossterm supports.
 
 See [docs/MANUAL.md](docs/MANUAL.md) for every key, the units, and the rules.
 
+## Play in your browser
+
+The `wasm` branch builds the same game for the web: the identical game code compiled to
+WebAssembly, with the screen drawn on a page instead of a terminal. Keys, the mouse
+and saving all work as in the terminal; saves stay in your browser's local storage.
+
+- **Online:** https://tymrek.github.io/rusted-empire/ (published from the `wasm` branch).
+  `?seed=N` in the address gives a reproducible world, and `?torus` a wrap-around map.
+- **Build it yourself:**
+  ```
+  rustup target add wasm32-unknown-unknown
+  cargo install wasm-bindgen-cli --version 0.2.117
+  web/build.sh
+  python3 tools/web_serve.py     # then open http://localhost:8000/
+  ```
+  The page has to come from a web server; opening the file directly won't work.
+
+Tested in Chromium; it should work in any current desktop browser (Firefox, Chrome,
+Edge, Safari). It needs a keyboard, so it isn't playable on phones.
+
 ## Command-line options
 
 | Option | Meaning |
