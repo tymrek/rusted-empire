@@ -1,0 +1,34 @@
+[package]
+name = "rs-empire-web"
+version = "0.9.1-beta"
+license = "GPL-2.0-only"
+edition = "2021"
+rust-version = "1.75"
+description = "rusted-empire in the browser: the same game code, compiled to WebAssembly"
+publish = false
+
+# The browser build compiles the game's own sources (../src) with a web front end
+# (src/web.rs) in place of the terminal. It is a separate package so the terminal
+# program's dependencies and Cargo.lock stay exactly as they are.
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+ratatui = { version = "=0.26.0", default-features = false }
+crossterm = { package = "crossterm-web-shim", path = "crossterm-shim" }
+# Same version as the terminal build (which pins it).
+unicode-segmentation = "=1.11.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.8"
+# rand gets its randomness from the browser (crypto.getRandomValues).
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "=0.2.117"
+js-sys = "=0.3.94"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

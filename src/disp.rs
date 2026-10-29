@@ -2,19 +2,26 @@ use crate::game::Game;
 use crate::models::{Terrain, Owner, PieceType, Loc};
 use crate::view::{GameMode, View};
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex, OnceLock};
+#[cfg(not(target_arch = "wasm32"))]
+use ratatui::{backend::CrosstermBackend, Terminal};
 use ratatui::{
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame, Terminal,
+    Frame,
 };
+
+// The real terminal. (The browser build draws with `render` onto its own screen.)
+#[cfg(not(target_arch = "wasm32"))]
 type TuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
 
+#[cfg(not(target_arch = "wasm32"))]
 static TUI_TERMINAL: OnceLock<Mutex<TuiTerminal>> = OnceLock::new();
 
+#[cfg(not(target_arch = "wasm32"))]
 fn get_terminal() -> std::sync::MutexGuard<'static, TuiTerminal> {
     TUI_TERMINAL.get_or_init(|| {
         let backend = CrosstermBackend::new(std::io::stdout());
@@ -43,6 +50,7 @@ pub fn view_axes(game: &Game, center: Loc, view_height: usize, view_width: usize
 /// Draws the whole screen on the real terminal: map, sidebar, message log, and `prompt`
 /// on the bottom lines, with the square in `active_blink` highlighted and shown or hidden
 /// (the bool) so that it blinks between calls.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn refresh_display_with_input_blinking(game: &Game, view: &mut View, prompt: &str, active_blink: Option<(Loc, bool)>) {
     view.follow_messages(game);
     let view = &*view;

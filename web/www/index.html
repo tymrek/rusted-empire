@@ -1,0 +1,30 @@
+<!doctype html>
+<!-- rusted-empire in the browser. Copyright (C) 2026 James T. Jordan; derived from
+     VMS-Empire, Copyright (C) 1987, 1988 Chuck Simmons. GPL-2.0-only; see LICENSE. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rusted-empire</title>
+  <meta name="description" content="VMS-Empire, the classic strategy wargame, in your browser.">
+  <style>
+    html, body { margin: 0; height: 100%; background: #101010; overflow: hidden; }
+    canvas { display: block; outline: none; }
+    #notice {
+      position: fixed; left: 50%; top: 2.5em; transform: translateX(-50%);
+      pointer-events: none; /* the mouse goes through to the game, except on the link */
+      max-width: min(40em, 90vw); padding: .8em 1.2em; border-radius: 6px;
+      background: #2e3436; color: #eeeeec; border: 1px solid #555753;
+      font: 15px/1.4 system-ui, sans-serif; text-align: center;
+    }
+    #notice.error { background: #4a1414; border-color: #cc0000; }
+    #notice a { color: #729fcf; pointer-events: auto; }
+  </style>
+</head>
+<body>
+  <canvas id="screen" tabindex="0" aria-label="rusted-empire game screen"></canvas>
+  <div id="notice" hidden></div>
+  <noscript><p style="color:#eee;font:16px sans-serif;padding:2em">rusted-empire needs JavaScript to run in the browser.</p></noscript>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

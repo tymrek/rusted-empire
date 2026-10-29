@@ -9,12 +9,15 @@
 use crate::game::{Game, OrderScope, MAP_COLS, MAP_ROWS};
 use crate::keys::{self, OrderKey, PIECE_KEYS};
 use crate::models::{Loc, MoveResult, Owner, Piece, PieceType, UnitActivity};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::terminal::TerminalGuard;
-use crate::ui::{TermUi, Ui};
+use crate::ui::{Instant, Ui};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::ui::TermUi;
 use crate::view::{self, GameMode, View};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How long to wait for a key before redrawing (for blinking and animation).
 const POLL: Duration = Duration::from_millis(50);
@@ -249,6 +252,7 @@ impl Session {
 }
 
 /// Runs the interactive game until the player quits.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run(opts: Options) -> io::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -481,7 +485,7 @@ pub(crate) fn awaiting_manual(p: &Piece) -> bool {
 fn autosave_if_due(s: &mut Session, interval: i32, last_autosaved_turn: &mut i32) {
     let game = &mut s.game;
     if interval > 0 && game.turn > 0 && game.turn % interval == 0 && game.turn != *last_autosaved_turn {
-        match game.save_game(&s.autosave_file) {
+        match s.ui.write_save(&s.autosave_file, game) {
             Ok(()) => game.log(format!("Autosaved game at turn {}.", game.turn)),
             Err(e) => game.log(format!("AUTOSAVE FAILED at turn {}: {}", game.turn, e)),
         }
@@ -755,7 +759,7 @@ fn idle_input(s: &mut Session, observer_mode: &mut bool) -> io::Result<bool> {
             s.game.log(String::from("Edit Mode engaged."));
             s.ui.drain();
         }
-        's' => match s.game.save_game(&s.save_file) {
+        's' => match s.ui.write_save(&s.save_file, &s.game) {
             Ok(()) => {
                 let msg = format!("Game saved to {}.", s.save_file);
                 s.game.log(msg);
@@ -773,7 +777,7 @@ fn idle_input(s: &mut Session, observer_mode: &mut bool) -> io::Result<bool> {
                 "Back to your own map."
             }));
         }
-        'l' => match Game::load_game(&s.save_file) {
+        'l' => match s.ui.read_save(&s.save_file) {
             Ok(loaded) => {
                 s.game = loaded;
                 s.view = View::default();

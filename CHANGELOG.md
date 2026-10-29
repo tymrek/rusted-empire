@@ -2,6 +2,21 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## Unreleased (wasm branch)
+
+### Added
+- **A browser version.** The same game compiled to WebAssembly, in `web/`, played on a
+  web page with the keyboard and mouse. Saves are kept in the browser's local storage.
+  It is published to GitHub Pages from the `wasm` branch. `?seed=N` and `?torus` in the
+  address work like `--seed` and `--torus`.
+- `tools/web_smoke.py`, an end-to-end test of the page in headless Chromium, and
+  `tools/web_serve.py`, a local web server with the headers the page needs.
+
+### Changed
+- Saving and loading go through the `Ui` (`write_save`, `read_save`), so the browser
+  can keep saves in local storage. `Game::to_save_string` and `from_save_string` are
+  the text form of a save. The terminal version still writes files exactly as before.
+
 ## 0.9.1-beta (2026-10-24)
 
 Bug fixes found in play, the new interface tests, and simpler handling

@@ -1,0 +1,64 @@
+# Builds the browser version (web/) and publishes it to GitHub Pages.
+#
+# Runs on every push to the wasm branch (and can be started by hand from the Actions
+# tab). Pull requests into wasm are built and tested but not published.
+# One-time setup: Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+name: Browser build
+
+on:
+  push:
+    branches: [wasm]
+  pull_request:
+    branches: [wasm]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain for WebAssembly
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: wasm-bindgen (same version as web/Cargo.toml)
+        run: cargo install wasm-bindgen-cli --version 0.2.117 --locked
+
+      - name: Build the browser version
+        run: web/build.sh
+
+      - name: Test the terminal version
+        run: cargo test --release
+
+      - name: Test the browser version in Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+          python tools/web_smoke.py
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/www
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,10 @@
+[package]
+name = "crossterm-web-shim"
+version = "0.27.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "The few crossterm event types rusted-empire's shared code uses, for the browser build"
+publish = false
+
+[lib]
+name = "crossterm"
