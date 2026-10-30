@@ -68,3 +68,17 @@ export function save_get(name) {
 export function finished(message) {
   self.postMessage({ type: "finished", message });
 }
+
+export function peek_kind() {
+  const ctl = st().ctl;
+  if (!pending(ctl)) return 0;
+  return Atomics.load(ctl, RING + (Atomics.load(ctl, TAIL) % CAPACITY) * SLOT);
+}
+
+export function announce(version, seed) {
+  self.postMessage({ type: "info", version, seed });
+}
+
+export function export_game(name, data) {
+  self.postMessage({ type: "export", name, data });
+}

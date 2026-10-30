@@ -62,6 +62,11 @@ and saving all work as in the terminal; saves stay in your browser's local stora
 
 - **Online:** https://tymrek.github.io/rusted-empire/ (published from the `wasm` branch).
   `?seed=N` in the address gives a reproducible world, and `?torus` a wrap-around map.
+- **The Menu button** (bottom right) shows the version and the world's seed, with a
+  link that replays the same map. From it you can download the game as a file, load a
+  downloaded game back in (then press `L` in the game), and report a problem: that
+  opens a GitHub issue already filled in with the version, seed, turn and browser.
+  Attaching the downloaded game to a report lets anyone see exactly what you saw.
 - **Build it yourself:**
   ```
   rustup target add wasm32-unknown-unknown

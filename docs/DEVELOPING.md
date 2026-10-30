@@ -363,6 +363,16 @@ only when it changed. The page paints it on a canvas and draws the box-drawing
 characters as lines. Saves go through `Ui::write_save` and `read_save` to local
 storage (`Game::to_save_string` and `from_save_string`).
 
+**The menu.** `run()` gives every new game a seed (`?seed=N`, or a random one) and
+calls `announce(version, seed)`; the version is read at compile time from the root
+`Cargo.toml`, so bumping the version there is enough. "Download this game" pushes an
+input event of kind 3 (`EXPORT_REQUEST`): `WebUi::poll` and `read` take it out of the
+stream without passing it to the game, and the next `draw` sends the save text to the
+page with `export_game`. Since it only acts on a draw, a game waiting at a startup
+question can't be exported. "Load a saved game" checks the file looks like a save,
+stores it as `empire.sav` in local storage and reloads; the player then presses `L`.
+The keyboard is not passed to the game while the menu is open.
+
 **Shared memory needs a "cross-origin isolated" page**, which normally means two
 response headers. GitHub Pages can't send headers, so `coi-sw.js` is a small service
 worker that adds them; on the first visit the page registers it and reloads once.
@@ -379,7 +389,8 @@ worker that adds them; on the first visit the page registers it and reloads once
 **Testing.** `tools/web_smoke.py` serves the build, drives it in headless Chromium
 with Playwright, and reads the screen back through the page's `rsEmpireScreenText()`.
 It covers startup, orders, edit mode, saving to and loading from local storage across
-a reload, the mouse, resizing and quitting. CI (`.github/workflows/web.yml`) runs it
+a reload, the mouse, resizing and quitting, and the menu: version and seed, the
+report link, downloading a game and loading it back in. CI (`.github/workflows/web.yml`) runs it
 on every push and pull request to `wasm`.
 
 **Publishing.** Every push to `wasm` builds and tests the page and publishes it to
