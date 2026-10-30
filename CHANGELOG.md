@@ -9,6 +9,11 @@ All notable changes to rusted-empire. Versions follow the repository's tags.
   web page with the keyboard and mouse. Saves are kept in the browser's local storage.
   It is published to GitHub Pages from the `wasm` branch. `?seed=N` and `?torus` in the
   address work like `--seed` and `--torus`.
+- **A menu for playtesters** on the web page: the version and the world's seed (with a
+  link that replays the same map), downloading the game as a JSON file, loading a
+  downloaded game back in, and a "Report a problem" link that opens a pre-filled
+  GitHub issue (version, seed, turn, browser). Every new web game now has a known
+  seed, picked at random when none is given.
 - `tools/web_smoke.py`, an end-to-end test of the page in headless Chromium, and
   `tools/web_serve.py`, a local web server with the headers the page needs.
 

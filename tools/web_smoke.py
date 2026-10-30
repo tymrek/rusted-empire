@@ -10,6 +10,8 @@ the screen back through the page's rsEmpireScreenText() hook. It checks that:
   - edit mode and the arrow keys work;
   - saving goes to local storage and survives a page reload, and loading brings it back;
   - the mouse wheel scrolls the message log, and the screen follows the window size;
+  - the menu shows the version and seed, downloads the current game, loads a
+    downloaded game back in, and pre-fills a problem report;
   - quitting asks to confirm and ends the game with a notice;
   - nothing is logged as an error along the way.
 
@@ -22,7 +24,10 @@ Exit status 0 if every check passes.
 """
 import functools
 import http.server
+import json
 import os
+import re
+import urllib.parse
 import sys
 import threading
 import time
@@ -33,6 +38,7 @@ except ImportError:
     sys.exit("web_smoke.py needs Playwright: pip install playwright && playwright install chromium")
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web", "www")
+CARGO_TOML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Cargo.toml")
 SEED = "1792784026"
 failures = []
 
@@ -91,6 +97,10 @@ def keys(page, *names):
 
 def start_game(page, url):
     page.goto(url + "?seed=" + SEED)
+    answer_startup(page)
+
+
+def answer_startup(page):
     check(page.evaluate("self.crossOriginIsolated"), "the page is cross-origin isolated")
     check(wait_for(page, "difficulty level"), "asks for a difficulty level", page)
     keys(page, "0", "Enter")
@@ -146,6 +156,45 @@ def main():
         keys(page, "l")
         check(wait_for(page, "Game loaded from empire.sav"), "after a reload, L loads the save", page)
         check(screen(page).splitlines()[0] == turn_line, "it is the same game, on the same turn", page)
+
+        print("the playtester menu")
+        version = re.search(r'^version = "([^"]+)"', open(CARGO_TOML).read(), re.M).group(1)
+        page.on("dialog", lambda d: d.accept())
+        page.click("#menu-button")
+        check(page.is_visible("#menu"), "the menu opens")
+        check(page.inner_text("#menu-version") == version, f"it shows the version ({version})")
+        check(page.inner_text("#menu-seed") == SEED, "it shows the world's seed")
+        check(("?seed=" + SEED) in page.get_attribute("#menu-seed-link", "href"), "with a link to play the same map")
+        report = urllib.parse.unquote(page.get_attribute("#menu-report", "href"))
+        check("issues/new" in report and version in report and SEED in report and "Turn:" in report,
+              "the problem report is pre-filled with version, seed and turn")
+        turn_before = screen(page).splitlines()[0]
+        keys(page, "n")
+        time.sleep(0.3)
+        check(screen(page).splitlines()[0] == turn_before, "keys don't reach the game while the menu is open")
+        keys(page, "Escape")
+        check(not page.is_visible("#menu"), "Esc closes the menu")
+        page.click("#menu-button")
+        with page.expect_download() as dl:
+            page.click("#menu-download")
+        path = dl.value.path()
+        exported = json.load(open(path))
+        turn_now = re.search(r"Turn: (\d+)", screen(page)).group(1)
+        check(str(exported.get("turn")) == turn_now and dl.value.suggested_filename.endswith(".json"),
+              f"Download gives the current game as JSON ({dl.value.suggested_filename})")
+        check("[N]ext" in screen(page) or "[Army at" in screen(page), "and the game carries on", page)
+        keys(page, "n")
+        time.sleep(0.3)
+        page.click("#menu-button")
+        with page.expect_navigation():
+            page.set_input_files("#menu-file", path)
+        page.wait_for_function("document.getElementById('notice').textContent.length > 0")
+        notice = page.inner_text("#notice")
+        check("is now the saved game" in notice, "loading a saved game file says so after the reload: " + repr(notice))
+        answer_startup(page)
+        keys(page, "l")
+        check(wait_for(page, "Game loaded from empire.sav"), "L then loads it", page)
+        check(re.search(r"Turn: (\d+)", screen(page)).group(1) == turn_now, "it is the downloaded game, on its turn", page)
 
         print("mouse and window size")
         page.mouse.move(400, 760)

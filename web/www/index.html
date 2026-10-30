@@ -19,11 +19,47 @@
     }
     #notice.error { background: #4a1414; border-color: #cc0000; }
     #notice a { color: #729fcf; pointer-events: auto; }
+    /* The menu: a small button in the bottom-right corner, and the panel it opens. */
+    #menu-button {
+      position: fixed; right: 6px; bottom: 4px; padding: 2px 10px;
+      background: #2e3436; color: #d3d7cf; border: 1px solid #555753; border-radius: 4px;
+      font: 13px system-ui, sans-serif; cursor: pointer; opacity: .75;
+    }
+    #menu-button:hover, #menu-button[aria-expanded="true"] { opacity: 1; }
+    #menu {
+      position: fixed; right: 6px; bottom: 34px; width: 19em; padding: .8em 1em;
+      background: #2e3436; color: #eeeeec; border: 1px solid #555753; border-radius: 6px;
+      font: 14px/1.5 system-ui, sans-serif;
+    }
+    #menu .facts { color: #babdb6; margin-bottom: .6em; }
+    #menu button, #menu a.action {
+      display: block; width: 100%; box-sizing: border-box; margin: .35em 0; padding: .45em .7em;
+      background: #3465a4; color: #fff; border: 0; border-radius: 4px; text-align: left;
+      font: inherit; cursor: pointer; text-decoration: none;
+    }
+    #menu button:hover, #menu a.action:hover { background: #4a7ab8; }
+    #menu a { color: #729fcf; }
+    #menu .hint { font-size: 12px; color: #babdb6; margin: 0 0 .3em; }
   </style>
 </head>
 <body>
   <canvas id="screen" tabindex="0" aria-label="rusted-empire game screen"></canvas>
   <div id="notice" hidden></div>
+  <button id="menu-button" aria-expanded="false" aria-controls="menu" title="Version, saved games, and reporting problems">Menu</button>
+  <div id="menu" hidden>
+    <div class="facts">
+      <div>rusted-empire <span id="menu-version">…</span></div>
+      <div id="menu-seed-line" hidden>World seed <span id="menu-seed"></span> · <a id="menu-seed-link" href="#" target="_blank" rel="noopener">play this map</a></div>
+    </div>
+    <button id="menu-download">Download this game</button>
+    <p class="hint">Saves the game as it is now, as a file you can attach to a problem report or keep.</p>
+    <button id="menu-load">Load a saved game…</button>
+    <p class="hint">Puts a downloaded game into this browser; then press L in the game.</p>
+    <a id="menu-report" class="action" href="#" target="_blank" rel="noopener">Report a problem</a>
+    <p class="hint">Opens a pre-filled form on GitHub (free account needed).</p>
+    <div class="facts"><a href="https://github.com/tymrek/rusted-empire" target="_blank" rel="noopener">Source code and license (GPL v2)</a></div>
+  </div>
+  <input id="menu-file" type="file" accept=".json,.sav,application/json" hidden>
   <noscript><p style="color:#eee;font:16px sans-serif;padding:2em">rusted-empire needs JavaScript to run in the browser.</p></noscript>
   <script type="module" src="main.js"></script>
 </body>

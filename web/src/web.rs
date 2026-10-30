@@ -48,6 +48,25 @@ extern "C" {
     fn save_get(name: &str) -> Option<String>;
     /// The game has ended (or crashed): `message` says why.
     fn finished(message: &str);
+    /// The kind of the next input event (see `decode`), or 0 if there is none.
+    fn peek_kind() -> i32;
+    /// Tells the page the game's version and the world's seed (empty for a loaded game).
+    fn announce(version: &str, seed: &str);
+    /// Hands the page the current game as save-file text, to download as `name`.
+    fn export_game(name: &str, data: &str);
+}
+
+/// The input event kind the page sends to ask for the current game (its menu's
+/// "Download this game"). It never reaches the game loop.
+const EXPORT_REQUEST: i32 = 3;
+
+/// The version of the game, from the main Cargo.toml (the terminal program's), so the
+/// browser build always reports the same version as the release it belongs to.
+fn version() -> &'static str {
+    include_str!("../../Cargo.toml")
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \"").and_then(|v| v.strip_suffix('"')))
+        .unwrap_or("unknown")
 }
 
 /// A point in time, from the browser's clock (the standard library's `Instant` doesn't
@@ -71,7 +90,10 @@ pub fn run(seed: String, torus: bool) {
     std::panic::set_hook(Box::new(|info| {
         finished(&format!("The game crashed: {}", info));
     }));
-    let opts = Options { load_file: None, seed: seed.trim().parse().ok(), torus };
+    // Every new game gets a known seed, so a playtester can report the exact map.
+    let seed: u64 = seed.trim().parse().unwrap_or_else(|_| rand::random::<u64>() >> 11);
+    announce(version(), &seed.to_string());
+    let opts = Options { load_file: None, seed: Some(seed), torus };
     let ui = WebUi::new();
     let ending = match app::start_session(opts, Box::new(ui)) {
         Ok(Some((mut session, autosave))) => match app::play(&mut session, autosave) {
@@ -89,12 +111,14 @@ pub struct WebUi {
     term: Terminal<TestBackend>,
     /// The last frame sent to the page, to send only frames that changed.
     last: Vec<u32>,
+    /// The page asked for the current game; it goes out with the next frame drawn.
+    export_pending: bool,
 }
 
 impl WebUi {
     pub fn new() -> Self {
         let (cols, rows) = Self::size();
-        WebUi { term: Terminal::new(TestBackend::new(cols, rows)).expect("in-memory terminal"), last: Vec::new() }
+        WebUi { term: Terminal::new(TestBackend::new(cols, rows)).expect("in-memory terminal"), last: Vec::new(), export_pending: false }
     }
 
     fn size() -> (u16, u16) {
@@ -216,14 +240,27 @@ fn decode(e: &[i32; 6]) -> Option<Event> {
 
 impl Ui for WebUi {
     fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
-        Ok(wait_input(timeout.as_secs_f64() * 1000.0))
+        if !wait_input(timeout.as_secs_f64() * 1000.0) {
+            return Ok(false);
+        }
+        if peek_kind() == EXPORT_REQUEST {
+            // Not input for the game: note it, and report "nothing yet" so the game loop
+            // redraws, which sends the game to the page (see `draw`).
+            let mut raw = [0i32; 6];
+            pop_input(&mut raw);
+            self.export_pending = true;
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     fn read(&mut self) -> io::Result<Event> {
         let mut raw = [0i32; 6];
         loop {
             if pop_input(&mut raw) {
-                if let Some(ev) = decode(&raw) {
+                if raw[0] == EXPORT_REQUEST {
+                    self.export_pending = true; // answered at the next frame drawn
+                } else if let Some(ev) = decode(&raw) {
                     return Ok(ev);
                 }
             } else {
@@ -239,6 +276,13 @@ impl Ui for WebUi {
 
     fn draw(&mut self, game: &Game, view: &mut View, prompt: &str, blink: Option<(Loc, bool)>) -> io::Result<()> {
         view.follow_messages(game);
+        if self.export_pending {
+            self.export_pending = false;
+            match game.to_save_string() {
+                Ok(data) => export_game(&format!("rusted-empire-turn-{}.json", game.turn), &data),
+                Err(e) => finished(&format!("Couldn't export the game: {}", e)),
+            }
+        }
         self.fit()?;
         let view = &*view;
         self.term.draw(|f| disp::render(f, game, view, prompt, blink))?;

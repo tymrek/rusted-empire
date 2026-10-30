@@ -185,6 +185,11 @@ function modifiers(e) {
 }
 
 window.addEventListener("keydown", (e) => {
+  if (!menu.hidden) {
+    // Keys belong to the menu while it is open; Esc closes it.
+    if (e.key === "Escape") { e.preventDefault(); closeMenu(); }
+    return;
+  }
   if (!ctl || e.isComposing || e.metaKey) return;
   // Leave the browser's own Ctrl shortcuts alone, except Ctrl-C, which the game uses to quit.
   if ((e.ctrlKey || e.altKey) && e.key.toLowerCase() !== "c") return;
@@ -237,6 +242,110 @@ window.addEventListener("mouseup", (e) => {
 
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
+// ---- the menu: version, seed, saved games, problem reports ---------------------
+
+const REPORT_URL = "https://github.com/tymrek/rusted-empire/issues/new";
+const menu = document.getElementById("menu");
+const menuButton = document.getElementById("menu-button");
+const fileInput = document.getElementById("menu-file");
+let gameInfo = { version: "", seed: "" };
+let exportTimer = null;
+
+function playLink(seed) {
+  const torus = new URLSearchParams(location.search).has("torus") ? "&torus" : "";
+  return location.origin + location.pathname + "?seed=" + seed + torus;
+}
+
+function currentTurn() {
+  const m = /Turn: (\d+)/.exec(window.rsEmpireScreenText());
+  return m ? m[1] : "?";
+}
+
+// A GitHub issue form filled in with what a report needs.
+function reportLink() {
+  const body = [
+    "**What happened?**", "", "",
+    "**What did you expect to happen?**", "", "",
+    "**How to make it happen again** (if you know):", "", "",
+    "---",
+    `- Version: rusted-empire ${gameInfo.version || "?"} (browser)`,
+    `- Browser: ${navigator.userAgent}`,
+    gameInfo.seed ? `- World seed: ${gameInfo.seed} (this map: ${playLink(gameInfo.seed)})` : "- World seed: (a loaded game)",
+    `- Turn: ${currentTurn()}`,
+    "- Saved game: use **Menu → Download this game** and drag the file into this box.",
+  ].join("\n");
+  const title = `[Playtest] `;
+  return `${REPORT_URL}?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+}
+
+function openMenu() {
+  document.getElementById("menu-report").href = reportLink();
+  menu.hidden = false;
+  menuButton.setAttribute("aria-expanded", "true");
+}
+
+function closeMenu() {
+  menu.hidden = true;
+  menuButton.setAttribute("aria-expanded", "false");
+  canvas.focus();
+}
+
+menuButton.addEventListener("click", () => (menu.hidden ? openMenu() : closeMenu()));
+canvas.addEventListener("mousedown", () => { if (!menu.hidden) closeMenu(); });
+
+function showInfo(version, seed) {
+  gameInfo = { version, seed };
+  document.title = `rusted-empire ${version}`;
+  document.getElementById("menu-version").textContent = version;
+  document.getElementById("menu-seed").textContent = seed;
+  document.getElementById("menu-seed-link").href = seed ? playLink(seed) : "#";
+  document.getElementById("menu-seed-line").hidden = !seed;
+}
+
+function download(name, data) {
+  const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+document.getElementById("menu-download").addEventListener("click", () => {
+  closeMenu();
+  if (ctl) {
+    // Ask the game for its current state; it arrives as an "export" message.
+    send([3]);
+    exportTimer = setTimeout(() => say("The download starts as soon as you answer the question at the bottom of the screen.", false, false, 8), 1500);
+    return;
+  }
+  // The game has ended: offer the last save instead.
+  const last = localStorage.getItem(SAVE_PREFIX + "empire.sav");
+  if (last) download("rusted-empire-saved.json", last);
+  else say("The game has ended and there's no saved game to download.", true, false, 6);
+});
+
+document.getElementById("menu-load").addEventListener("click", () => fileInput.click());
+
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files[0];
+  fileInput.value = "";
+  closeMenu();
+  if (!file) return;
+  const text = await file.text();
+  let ok = false;
+  try { const g = JSON.parse(text); ok = !!(g && g.map && g.cities); } catch (_) {}
+  if (!ok) { say(`"${file.name}" isn't a rusted-empire saved game.`, true, false, 8); return; }
+  if (localStorage.getItem(SAVE_PREFIX + "empire.sav") &&
+      !window.confirm("Replace the game saved in this browser with " + file.name + "?")) return;
+  storeSave("empire.sav", text);
+  // The game reads saves when it starts, so restart it with this one in place.
+  sessionStorage.setItem("rs-empire-imported", file.name);
+  location.reload();
+});
+
 // ---- start ---------------------------------------------------------------------
 
 function loadSaves() {
@@ -287,13 +396,18 @@ async function start() {
   worker.onmessage = (e) => {
     const m = e.data;
     if (m.type === "frame") paint(m);
+    else if (m.type === "info") showInfo(m.version, m.seed);
+    else if (m.type === "export") { clearTimeout(exportTimer); say("", false); download(m.name, m.data); }
     else if (m.type === "save") storeSave(m.name, m.data);
     else if (m.type === "finished") { say(m.message, m.message.startsWith("The game c"), true); ctl = null; }
   };
   worker.onerror = (e) => say("The game failed to load: " + (e.message || e), true);
   worker.postMessage({ ctl: ctl.buffer, saves: loadSaves(), seed: params.get("seed") || "", torus: params.has("torus") });
   canvas.focus();
-  say("rusted-empire: VMS-Empire in your browser. Free software under the GNU GPL v2.", false, true, 8);
+  const imported = sessionStorage.getItem("rs-empire-imported");
+  sessionStorage.removeItem("rs-empire-imported");
+  if (imported) say(`"${imported}" is now the saved game in this browser. Start a game, then press L to load it.`, false, false, 20);
+  else say("rusted-empire: VMS-Empire in your browser. Free software under the GNU GPL v2.", false, true, 8);
 }
 
 start();
