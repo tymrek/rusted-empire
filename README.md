@@ -102,6 +102,8 @@ The rules follow VMS-Empire 1.13. These are the deliberate changes:
   boats and destroyers 4, carriers and battleships 5, fighters 6, satellites 10).
   In the original, everything sees only the squares next to it, and satellites see
   two.
+- **You start seeing 6 squares around your first city**, instead of only the squares
+  next to it. On a shared continent you can see the enemy's city from turn 1.
 - **Sentries wake when an enemy comes within sight**, not only when one is next to
   them. A fighter on sentry scrambles to attack.
 - **Destroyers detect submarines up to 4 squares away.** In the original, submarines
@@ -115,9 +117,9 @@ The rules follow VMS-Empire 1.13. These are the deliberate changes:
   on a continent whose only coast is a lake.
 - Cities are placed at a fixed minimum spacing, close to the original's derived value.
 
-The sight, sentry and submarine changes are under review during the beta. The
-headless rig's `--original-sight` and `--adjacent-subs` switches measure what they
-change.
+The sight (including the starting view), sentry and submarine changes are under
+review during the beta. The headless rig's `--original-sight` and `--adjacent-subs`
+switches measure what they change.
 
 **Kept on purpose, because the original does it this way:** the computer player
 ignores fighter fuel when it attacks, and the difficulty level only chooses the
