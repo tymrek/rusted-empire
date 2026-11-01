@@ -314,7 +314,7 @@ fn screen_renders_at_any_size_in_every_mode() {
         for mode in modes {
             for comp_view in [false, true] {
                 let mut view = View { mode, cursor: home, show_comp_view: comp_view, ..View::default() };
-                render(&g, &mut view, w, h, "[N]ext, [A]utomove, [M]anual, [S]ave, [L]oad, [Q]uit: ", Some((home, true)));
+                render(&g, &mut view, w, h, "[N]ext, [A]utomove, [M]anual, [E]dit, [S]ave, [L]oad, [Q]uit: ", Some((home, true)));
             }
         }
     }
