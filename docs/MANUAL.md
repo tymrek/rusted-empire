@@ -143,7 +143,7 @@ orders, and the prompt says which order it was on, for example `[STUCK: Dest]`.
 ### Turn and game keys
 
 When no unit needs orders, the prompt reads
-`[N]ext, [A]utomove, [M]anual, [S]ave, [L]oad, [Q]uit`. While a unit is being asked
+`[N]ext, [A]utomove, [M]anual, [E]dit, [S]ave, [L]oad, [Q]uit`. While a unit is being asked
 about, `A`, `M`/`O`, `E` and `Q` work too; `N` and `S` mean skip and sentry there.
 
 | Key | Action |

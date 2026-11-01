@@ -2,6 +2,12 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## Unreleased
+
+### Fixed
+- The turn prompt didn't list `E` (edit mode). It now reads `[N]ext, [A]utomove,
+  [M]anual, [E]dit, [S]ave, [L]oad, [Q]uit`.
+
 ## Unreleased (wasm branch)
 
 ### Added
