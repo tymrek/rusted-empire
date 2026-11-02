@@ -379,6 +379,12 @@ The keyboard is not passed to the game while the menu is open.
 **Shared memory needs a "cross-origin isolated" page**, which normally means two
 response headers. GitHub Pages can't send headers, so `coi-sw.js` is a small service
 worker that adds them; on the first visit the page registers it and reloads once.
+It also asks the server about the page's own files on every load (`cache: "no-cache"`),
+so a new upload is picked up straight away. Without that, a browser could keep running
+cached copies of the scripts and WebAssembly for days after an upload, especially when
+the uploaded files keep old modification dates. A server that sends the two headers
+itself doesn't use the worker; it should send `Cache-Control: no-cache` for the same
+reason.
 `tools/web_serve.py` sends the headers itself, for local testing.
 
 **Keeping the shared code buildable for the web:**
