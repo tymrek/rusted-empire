@@ -2801,4 +2801,190 @@ mod tests {
         assert_eq!(game.pieces[0].loc, Loc { r: 7, c: 5 });
         assert!(game.messages.last().unwrap().contains("South"), "{:?}", game.messages.last());
     }
+
+    // ---- every loss and win is reported in the message log ----
+
+    fn logged(game: &Game, needle: &str) -> bool {
+        game.messages.iter().any(|m| m.contains(needle))
+    }
+
+    #[test]
+    fn test_computer_attack_on_your_ship_is_reported() {
+        // The bug from play: a computer patrol boat sank a transport and nothing was
+        // logged, because the computer's moves threw their messages away.
+        let mut lost = false;
+        let mut defended = false;
+        for _ in 0..200 {
+            let mut game = Game::new(10, 10, 50);
+            game.map = vec![vec![Terrain::Sea; 10]; 10];
+            game.pieces.push(test_piece(1, PieceType::PatrolBoat, Owner::Comp, 5, 5));
+            game.pieces.push(test_piece(2, PieceType::Transport, Owner::Player, 5, 6));
+            game.comp_move();
+            let transport_alive = game.pieces.iter().any(|p| p.id == 2);
+            let boat_alive = game.pieces.iter().any(|p| p.id == 1);
+            if transport_alive == boat_alive {
+                continue; // no fight this time
+            }
+            if !transport_alive {
+                assert!(logged(&game, "Your Transport at (5,6) was DESTROYED by enemy PatrolBoat"), "{:?}", game.messages);
+                lost = true;
+            } else {
+                assert!(logged(&game, "Your Transport at (5,6) destroyed an attacking enemy PatrolBoat"), "{:?}", game.messages);
+                defended = true;
+            }
+            if lost && defended {
+                return;
+            }
+        }
+        panic!("didn't see both outcomes (lost {}, defended {})", lost, defended);
+    }
+
+    #[test]
+    fn test_sunk_transport_reports_the_armies_aboard() {
+        for _ in 0..200 {
+            let mut game = Game::new(10, 10, 50);
+            game.map = vec![vec![Terrain::Sea; 10]; 10];
+            game.pieces.push(test_piece(1, PieceType::Battleship, Owner::Comp, 5, 5));
+            let mut transport = test_piece(2, PieceType::Transport, Owner::Player, 5, 6);
+            transport.hits = 1;
+            transport.cargo.push(test_piece(3, PieceType::Army, Owner::Player, 5, 6));
+            transport.cargo.push(test_piece(4, PieceType::Army, Owner::Player, 5, 6));
+            game.pieces.push(transport);
+            let (result, msg) = game.attempt_move(0, Loc { r: 5, c: 6 });
+            if result == MoveResult::CombatWon {
+                assert!(msg.contains("Your Transport at (5,6) was DESTROYED by enemy Battleship! <<<\n2 Armies aboard went down with it."), "{}", msg);
+                return;
+            }
+        }
+        panic!("the battleship never won");
+    }
+
+    #[test]
+    fn test_your_attacks_report_where_they_happened() {
+        for want_win in [true, false] {
+            for _ in 0..200 {
+                let mut game = combat_world();
+                game.pieces.push(test_piece(1, PieceType::Army, Owner::Player, 5, 5));
+                game.pieces.push(test_piece(2, PieceType::Army, Owner::Comp, 5, 6));
+                let (result, msg) = game.attempt_move(0, Loc { r: 5, c: 6 });
+                if (result == MoveResult::CombatWon) != want_win {
+                    continue;
+                }
+                let want = if want_win {
+                    "VICTORY! Your Army DESTROYED enemy Army at (5,6)!"
+                } else {
+                    "DEFEAT! Your Army was DESTROYED by enemy Army at (5,6)!"
+                };
+                assert!(msg.contains(want), "{}", msg);
+                break;
+            }
+        }
+    }
+
+    /// A player city at (5,5) holding an army and a fighter, with a computer army next to it.
+    fn your_city_under_attack() -> Game {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![Terrain::Land; 10]; 10];
+        game.cities.push(City {
+            loc: Loc { r: 5, c: 5 }, owner: Owner::Player, prod: PieceType::Army, work: 0,
+            default_orders: Vec::new(), seen_owner: None,
+        });
+        game.pieces.push(test_piece(1, PieceType::Army, Owner::Comp, 5, 4));
+        game.pieces.push(test_piece(2, PieceType::Army, Owner::Player, 5, 5));
+        game.pieces.push(test_piece(3, PieceType::Fighter, Owner::Player, 5, 5));
+        game
+    }
+
+    #[test]
+    fn test_losing_a_city_reports_what_went_with_it() {
+        for _ in 0..200 {
+            let mut game = your_city_under_attack();
+            let (result, msg) = game.attempt_move(0, Loc { r: 5, c: 5 });
+            if matches!(result, MoveResult::CityCaptured(_)) {
+                assert!(msg.contains("The enemy captured your city at (5,5)!"), "{}", msg);
+                assert!(msg.contains("1 of your armies in it was killed."), "{}", msg);
+                assert!(msg.contains("The enemy seized 1 Fighter."), "{}", msg);
+                return;
+            }
+        }
+        panic!("the city never fell");
+    }
+
+    #[test]
+    fn test_beating_off_an_assault_is_reported() {
+        for _ in 0..200 {
+            let mut game = your_city_under_attack();
+            let (result, msg) = game.attempt_move(0, Loc { r: 5, c: 5 });
+            if result == MoveResult::CityAssaultFailed {
+                assert!(msg.contains("Enemy army DESTROYED attacking your city at (5,5)"), "{}", msg);
+                return;
+            }
+        }
+        panic!("the assault never failed");
+    }
+
+    #[test]
+    fn test_computer_city_assault_is_logged() {
+        // The computer's own move must put the city's fate in the log.
+        for _ in 0..200 {
+            let mut game = your_city_under_attack();
+            game.comp_move();
+            if game.cities[0].owner == Owner::Comp {
+                assert!(logged(&game, "The enemy captured your city at (5,5)!"), "{:?}", game.messages);
+                return;
+            }
+            if !game.pieces.iter().any(|p| p.id == 1) {
+                assert!(logged(&game, "Enemy army DESTROYED attacking your city"), "{:?}", game.messages);
+            }
+        }
+        panic!("the computer never took the city");
+    }
+
+    #[test]
+    fn test_taking_a_city_reports_what_you_seized() {
+        for _ in 0..500 {
+            let mut game = city_assault_world();
+            let (result, msg) = game.attempt_move(0, Loc { r: 5, c: 5 });
+            if matches!(result, MoveResult::CityCaptured(_)) {
+                assert!(msg.contains("You took (5,5)!"), "{}", msg);
+                assert!(msg.contains("2 enemy armies in it were killed."), "{}", msg);
+                assert!(msg.contains("You seized 1 Fighter and 1 Transport."), "{}", msg);
+                return;
+            }
+        }
+        panic!("never captured");
+    }
+
+    #[test]
+    fn test_enemy_fighter_lost_over_your_city_is_reported() {
+        let mut game = your_city_under_attack();
+        game.pieces.push(test_piece(9, PieceType::Fighter, Owner::Comp, 4, 5));
+        let i = game.pieces.len() - 1;
+        let (result, msg) = game.attempt_move(i, Loc { r: 5, c: 5 });
+        assert_eq!(result, MoveResult::CombatLost);
+        assert!(msg.contains("DEFENSE! An enemy Fighter was shot down over your city at (5,5)!"), "{}", msg);
+    }
+
+    #[test]
+    fn test_only_your_own_satellites_burning_up_are_reported() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        for (id, owner) in [(1, Owner::Player), (2, Owner::Comp)] {
+            let mut sat = test_piece(id, PieceType::Satellite, owner, 5, 5);
+            sat.fuel = 1;
+            game.pieces.push(sat);
+        }
+        game.process_turn();
+        let burned: Vec<_> = game.messages.iter().filter(|m| m.contains("burned up")).collect();
+        assert_eq!(burned.len(), 1, "{:?}", burned);
+        assert!(burned[0].starts_with("Your Satellite"), "{:?}", burned);
+    }
+
+    #[test]
+    fn test_a_message_of_several_lines_is_logged_line_by_line() {
+        let mut game = Game::new(10, 10, 50);
+        let before = game.messages.len();
+        game.log(String::from(">>> ALERT! Your city fell! <<< \nThe enemy seized 1 Fighter."));
+        assert_eq!(&game.messages[before..], [">>> ALERT! Your city fell! <<<", "The enemy seized 1 Fighter."]);
+    }
 }
