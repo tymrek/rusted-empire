@@ -268,7 +268,7 @@ function reportLink() {
     "**What did you expect to happen?**", "", "",
     "**How to make it happen again** (if you know):", "", "",
     "---",
-    `- Version: rusted-empire ${gameInfo.version || "?"} (browser)`,
+    `- Version: rusted-empire ${gameInfo.version || "?"} (browser${gameInfo.build ? ", build " + gameInfo.build : ""})`,
     `- Browser: ${navigator.userAgent}`,
     gameInfo.seed ? `- World seed: ${gameInfo.seed} (this map: ${playLink(gameInfo.seed)})` : "- World seed: (a loaded game)",
     `- Turn: ${currentTurn()}`,
@@ -293,10 +293,11 @@ function closeMenu() {
 menuButton.addEventListener("click", () => (menu.hidden ? openMenu() : closeMenu()));
 canvas.addEventListener("mousedown", () => { if (!menu.hidden) closeMenu(); });
 
-function showInfo(version, seed) {
-  gameInfo = { version, seed };
+function showInfo(version, build, seed) {
+  gameInfo = { version, build, seed };
   document.title = `rusted-empire ${version}`;
   document.getElementById("menu-version").textContent = version;
+  document.getElementById("menu-build").textContent = build ? `build ${build}` : "";
   document.getElementById("menu-seed").textContent = seed;
   document.getElementById("menu-seed-link").href = seed ? playLink(seed) : "#";
   document.getElementById("menu-seed-line").hidden = !seed;
@@ -396,7 +397,7 @@ async function start() {
   worker.onmessage = (e) => {
     const m = e.data;
     if (m.type === "frame") paint(m);
-    else if (m.type === "info") showInfo(m.version, m.seed);
+    else if (m.type === "info") showInfo(m.version, m.build, m.seed);
     else if (m.type === "export") { clearTimeout(exportTimer); say("", false); download(m.name, m.data); }
     else if (m.type === "save") storeSave(m.name, m.data);
     else if (m.type === "finished") { say(m.message, m.message.startsWith("The game c"), true); ctl = null; }

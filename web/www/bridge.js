@@ -75,8 +75,8 @@ export function peek_kind() {
   return Atomics.load(ctl, RING + (Atomics.load(ctl, TAIL) % CAPACITY) * SLOT);
 }
 
-export function announce(version, seed) {
-  self.postMessage({ type: "info", version, seed });
+export function announce(version, build, seed) {
+  self.postMessage({ type: "info", version, build, seed });
 }
 
 export function export_game(name, data) {

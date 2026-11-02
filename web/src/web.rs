@@ -50,8 +50,9 @@ extern "C" {
     fn finished(message: &str);
     /// The kind of the next input event (see `decode`), or 0 if there is none.
     fn peek_kind() -> i32;
-    /// Tells the page the game's version and the world's seed (empty for a loaded game).
-    fn announce(version: &str, seed: &str);
+    /// Tells the page the game's version, the commit it was built from (empty if not
+    /// known) and the world's seed.
+    fn announce(version: &str, build: &str, seed: &str);
     /// Hands the page the current game as save-file text, to download as `name`.
     fn export_game(name: &str, data: &str);
 }
@@ -92,7 +93,7 @@ pub fn run(seed: String, torus: bool) {
     }));
     // Every new game gets a known seed, so a playtester can report the exact map.
     let seed: u64 = seed.trim().parse().unwrap_or_else(|_| rand::random::<u64>() >> 11);
-    announce(version(), &seed.to_string());
+    announce(version(), option_env!("RS_EMPIRE_BUILD").unwrap_or(""), &seed.to_string());
     let opts = Options { load_file: None, seed: Some(seed), torus };
     let ui = WebUi::new();
     let ending = match app::start_session(opts, Box::new(ui)) {

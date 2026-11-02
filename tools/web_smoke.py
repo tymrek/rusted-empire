@@ -27,6 +27,7 @@ import http.server
 import json
 import os
 import re
+import subprocess
 import urllib.parse
 import sys
 import threading
@@ -163,6 +164,8 @@ def main():
         page.click("#menu-button")
         check(page.is_visible("#menu"), "the menu opens")
         check(page.inner_text("#menu-version") == version, f"it shows the version ({version})")
+        build = subprocess.run(["git", "log", "-1", "--format=%h"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+        check(page.inner_text("#menu-build").startswith("build " + build), f"and the commit it was built from ({build})")
         check(page.inner_text("#menu-seed") == SEED, "it shows the world's seed")
         check(("?seed=" + SEED) in page.get_attribute("#menu-seed-link", "href"), "with a link to play the same map")
         report = urllib.parse.unquote(page.get_attribute("#menu-report", "href"))
