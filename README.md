@@ -62,6 +62,7 @@ See [docs/MANUAL.md](docs/MANUAL.md) for every key, the units, and the rules.
 | `--seed N` | Make a new game reproducible: the same seed gives the same world. |
 | `-t`, `--torus` | New game on a map that wraps around at its edges. |
 | `--headless` | Run AI-vs-AI test games instead of playing (see below). |
+| `--version`, `-V` | Print the version and exit. |
 
 ### Headless test rig
 

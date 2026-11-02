@@ -365,6 +365,13 @@ When the game is split into a server and clients:
 
 - Changes arrive as patch series (`git am`) against `main`. Keep one topic per patch,
   with the reason in the commit message.
+- **Every change merged into `main` bumps the version**, so any build can be told
+  apart: the last number in `version` in `Cargo.toml` (0.9.2-beta, 0.9.3-beta, ...).
+  Change it in `Cargo.lock` too (the `rs-empire` entry; edit it by hand so the file
+  stays in format 3), and put the change under that version's heading in the
+  CHANGELOG. A GitHub release is made from whichever version is current when it is
+  time for one. `rs-empire --version` prints it, and the browser version's menu shows
+  it together with the commit it was built from.
 - A rule change that departs from the original goes in the README's differences list,
   with a test.
 - Before sending: `cargo build`, `cargo test` and `cargo clippy` on the oldest

@@ -2,7 +2,10 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
-## Unreleased
+## 0.9.2-beta (not yet released)
+
+### Added
+- `--version` (or `-V`) prints the version.
 
 ### Fixed
 - **Losses to the computer's attacks went unreported.** When the computer's units
