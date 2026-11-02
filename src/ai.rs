@@ -610,7 +610,11 @@ impl Game {
     fn comp_step(&mut self, i: usize, to: usize, ctx: &Ctx) {
         let to_loc = ctx.loc(to);
         let from = self.pieces[i].loc;
-        let (result, _) = self.attempt_move(i, to_loc);
+        let (result, msg) = self.attempt_move(i, to_loc);
+        // What the move did to the player's side (a unit lost, a city taken) is reported.
+        if !msg.is_empty() {
+            self.log(msg);
+        }
         if result == MoveResult::InvalidMove {
             self.pieces[i].moves_left = 0;
         }
@@ -754,7 +758,10 @@ impl Game {
         if t_loc == self.pieces[i].loc {
             if self.army_ship(i) != Some(t) {
                 // in port with the transport: go aboard
-                let _ = self.attempt_move(i, t_loc);
+                let (_, msg) = self.attempt_move(i, t_loc);
+                if !msg.is_empty() {
+                    self.log(msg);
+                }
             }
             if self.pieces[i].hits > 0 {
                 self.pieces[i].moves_left = 0;
