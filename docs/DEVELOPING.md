@@ -364,8 +364,11 @@ characters as lines. Saves go through `Ui::write_save` and `read_save` to local
 storage (`Game::to_save_string` and `from_save_string`).
 
 **The menu.** `run()` gives every new game a seed (`?seed=N`, or a random one) and
-calls `announce(version, seed)`; the version is read at compile time from the root
-`Cargo.toml`, so bumping the version there is enough. "Download this game" pushes an
+calls `announce(version, build, seed)`. The version is read at compile time from the
+root `Cargo.toml`, so bumping the version there is enough. The build is the commit
+being built ("82da896, 2026-11-02", with "+" for uncommitted changes), which
+`build.sh` passes in `RS_EMPIRE_BUILD`; the menu shows it after the version, so even
+a web-only change can be told apart on a live site. "Download this game" pushes an
 input event of kind 3 (`EXPORT_REQUEST`): `WebUi::poll` and `read` take it out of the
 stream without passing it to the game, and the next `draw` sends the save text to the
 page with `export_game`. Since it only acts on a draw, a game waiting at a startup

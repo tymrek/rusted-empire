@@ -32,6 +32,8 @@ All notable changes to rusted-empire. Versions follow the repository's tags.
   downloaded game back in, and a "Report a problem" link that opens a pre-filled
   GitHub issue (version, seed, turn, browser). Every new web game now has a known
   seed, picked at random when none is given.
+- The menu shows the commit the page was built from after the version (for example
+  `build 82da896, 2026-11-02`), so a live copy can be matched to the code.
 - `tools/web_smoke.py`, an end-to-end test of the page in headless Chromium, and
   `tools/web_serve.py`, a local web server with the headers the page needs.
 
