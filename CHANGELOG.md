@@ -2,6 +2,14 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## 0.9.4-beta (not yet released)
+
+### Fixed
+- **A unit that sank a transport didn't move into its square.** Armies left on the
+  sunk transport's deck counted as still holding the square, so the winner (a fighter,
+  say) stayed where it was, even though those armies then drowned. Armies stranded in
+  open sea no longer hold a square.
+
 ## 0.9.3-beta (not yet released)
 
 ### Fixed
