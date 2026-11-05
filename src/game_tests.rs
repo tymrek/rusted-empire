@@ -84,6 +84,40 @@ mod tests {
     }
 
     #[test]
+    fn test_fuel_clearance_lasts_until_landing() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![Terrain::Land; 10]; 10];
+        game.cities.push(City {
+            loc: Loc { r: 5, c: 6 }, owner: Owner::Player, prod: PieceType::Army, work: 0,
+            default_orders: Vec::new(), seen_owner: None,
+        });
+        game.pieces.push(Piece {
+            id: 1, ptype: PieceType::Fighter, owner: Owner::Player, loc: Loc { r: 5, c: 4 },
+            hits: 1, moves_left: 8, activity: UnitActivity::Idle, cargo: Vec::new(), fuel: 5,
+        });
+        game.fuel_cleared.insert(1);
+        game.attempt_move(0, Loc { r: 5, c: 5 });
+        assert!(game.fuel_cleared.contains(&1), "still flying: still cleared");
+        game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert!(!game.fuel_cleared.contains(&1), "landing ends the clearance");
+    }
+
+    #[test]
+    fn test_fuel_clearance_is_forgotten_when_the_fighter_is_lost() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![Terrain::Land; 10]; 10];
+        game.pieces.push(Piece {
+            id: 1, ptype: PieceType::Fighter, owner: Owner::Player, loc: Loc { r: 5, c: 4 },
+            hits: 1, moves_left: 8, activity: UnitActivity::Idle, cargo: Vec::new(), fuel: 1,
+        });
+        game.fuel_cleared.insert(1);
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 5 });
+        assert_eq!(result, MoveResult::CombatLost, "ran out of fuel");
+        game.process_turn();
+        assert!(game.fuel_cleared.is_empty());
+    }
+
+    #[test]
     fn test_cargo_boarding_limits() {
         let mut game = Game::new(10, 10, 50);
         game.map = vec![vec![Terrain::Sea; 10]; 10];
