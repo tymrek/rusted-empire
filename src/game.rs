@@ -1232,7 +1232,14 @@ impl Game {
                 // If another enemy still holds the sector (an air unit over a ground unit, or the
                 // reverse), the winner stays put: it must beat the rest of the stack before it
                 // can occupy the tile or take a city there.
-                let others_remain = enemy_candidates.iter().any(|&i| i != e_idx && self.pieces[i].hits > 0);
+                // Armies left standing in open sea by a sunk transport don't count: they are
+                // about to drown and can't hold the sector.
+                let at_sea = self.map[target_loc.r][target_loc.c] == Terrain::Sea;
+                let stranded = |p: &Piece| at_sea && p.ptype == PieceType::Army
+                    && !self.pieces.iter().any(|t| t.ptype == PieceType::Transport && t.hits > 0
+                        && t.loc == target_loc && t.owner == p.owner);
+                let others_remain = enemy_candidates.iter()
+                    .any(|&i| i != e_idx && self.pieces[i].hits > 0 && !stranded(&self.pieces[i]));
                 let advance = !suicidal && !others_remain;
 
                 if advance {

@@ -1267,6 +1267,25 @@ mod tests {
     }
 
     #[test]
+    fn test_fighter_that_sinks_a_transport_moves_in_over_its_drowning_armies() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        let mut fighter = test_piece(1, PieceType::Fighter, Owner::Player, 5, 5);
+        fighter.hits = 1000;
+        game.pieces.push(fighter);
+        let mut transport = test_piece(2, PieceType::Transport, Owner::Comp, 5, 6);
+        transport.hits = 1;
+        game.pieces.push(transport);
+        // an army awake on the transport's deck
+        game.pieces.push(test_piece(3, PieceType::Army, Owner::Comp, 5, 6));
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatWon);
+        assert!(game.pieces[1].hits <= 0, "the transport is sunk");
+        assert!(game.pieces[2].hits <= 0, "its army drowns");
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 6 }, "the fighter moves into the sector");
+    }
+
+    #[test]
     fn test_army_that_loses_at_sea_is_destroyed() {
         let mut game = sea_world(1);
         let mut ship = test_piece(2, PieceType::Battleship, Owner::Comp, 5, 6);
