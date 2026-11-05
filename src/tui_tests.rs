@@ -803,6 +803,33 @@ fn fighter_fuel_warning_can_call_off_a_move() {
     assert!(ui.screen().prompt.contains("[Fighter at"));
 }
 
+#[test]
+fn fighter_cleared_past_its_fuel_is_not_asked_again() {
+    let mut g = world(SEED);
+    let home = g.cities[player_city(&g)].loc;
+    // a direction with three squares in a row away from home and no other city
+    let dirs = [((-1, -1), '7'), ((-1, 0), '8'), ((-1, 1), '9'), ((0, -1), '4'), ((0, 1), '6'), ((1, -1), '1'), ((1, 0), '2'), ((1, 1), '3')];
+    let (d, k) = dirs.into_iter().find(|&(d, _)| {
+        let mut l = home;
+        (1..=3).all(|_| match g.step(l, d) {
+            Some(n) if !g.cities.iter().any(|c| c.loc == n) => { l = n; true }
+            _ => false,
+        })
+    }).unwrap();
+    let start = g.step(home, d).unwrap();
+    let f = add_unit(&mut g, PieceType::Fighter, Owner::Player, start);
+    let id = g.pieces[f].id;
+    // two squares of fuel: the first step out is past the limit, the second runs dry
+    g.pieces[f].fuel = 2;
+    let (mut s, _ui) = session(g, 120, 40, typed(&format!("{}y{}", k, k)));
+    assert!(!play(&mut s));
+    let warnings = s.game.messages.iter().filter(|m| m.contains("fuel warning")).count();
+    assert_eq!(warnings, 0, "{:?}", s.game.messages);
+    assert!(s.game.messages.iter().any(|m| m.contains("ran out of fuel")),
+        "the second step went ahead without asking again: {:?}", s.game.messages);
+    assert!(!s.game.pieces.iter().any(|p| p.id == id && p.hits > 0));
+}
+
 // ---------------------------------------------------------------------------------
 // 3. Fuzz tests
 // ---------------------------------------------------------------------------------

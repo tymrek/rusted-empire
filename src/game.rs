@@ -221,6 +221,10 @@ pub struct Game {
     /// `-t`: the playable map wraps around at its top, bottom, left and right edges.
     #[serde(default)]
     pub torus: bool,
+    /// Ids of the player's fighters that were cleared to fly beyond their fuel limit.
+    /// The fuel warning is not asked again for them until they land (refuel) or are lost.
+    #[serde(default)]
+    pub fuel_cleared: std::collections::HashSet<usize>,
 }
 
 impl Game {
@@ -256,6 +260,7 @@ impl Game {
             rng: fresh_rng(),
             moved_this_turn: std::collections::HashSet::new(),
             torus: false,
+            fuel_cleared: std::collections::HashSet::new(),
             default_orders: vec![
                 (PieceType::Army, UnitActivity::Idle),
                 (PieceType::Fighter, UnitActivity::Idle),
@@ -1142,6 +1147,7 @@ impl Game {
                 let fuel_left = boarded_piece.fuel - 1;
                 self.note_landing(unit_owner, fuel_left);
                 boarded_piece.fuel = FIGHTER_FUEL;
+                self.fuel_cleared.remove(&boarded_piece.id);
             }
             self.pieces[carrier_idx].cargo.push(boarded_piece);
             self.pieces[piece_idx].hits = 0;
@@ -1278,6 +1284,8 @@ impl Game {
                         let fuel_left = self.pieces[piece_idx].fuel;
                         self.note_landing(unit_owner, fuel_left);
                         self.pieces[piece_idx].fuel = FIGHTER_FUEL;
+                        let id = self.pieces[piece_idx].id;
+                        self.fuel_cleared.remove(&id);
                         self.pieces[piece_idx].moves_left = 0;
                     } else if self.pieces[piece_idx].fuel <= 0 {
                         self.pieces[piece_idx].hits = 0;
@@ -1325,6 +1333,8 @@ impl Game {
                 let fuel_left = self.pieces[piece_idx].fuel;
                 self.note_landing(unit_owner, fuel_left);
                 self.pieces[piece_idx].fuel = FIGHTER_FUEL;
+                let id = self.pieces[piece_idx].id;
+                self.fuel_cleared.remove(&id);
                 self.pieces[piece_idx].moves_left = 0;
             } else if self.pieces[piece_idx].fuel <= 0 {
                 self.pieces[piece_idx].hits = 0;
@@ -1602,6 +1612,14 @@ impl Game {
             }
         }
         self.moved_this_turn.clear();
+        // Forget fuel clearances for fighters that have been lost.
+        if !self.fuel_cleared.is_empty() {
+            let alive: std::collections::HashSet<usize> = self.pieces.iter()
+                .filter(|p| p.hits > 0)
+                .flat_map(|p| std::iter::once(p.id).chain(p.cargo.iter().map(|c| c.id)))
+                .collect();
+            self.fuel_cleared.retain(|id| alive.contains(id));
+        }
 
         for (idx, p) in self.pieces.iter_mut().enumerate() {
             if p.owner == Owner::Player || p.owner == Owner::Comp {
@@ -2619,6 +2637,8 @@ impl Game {
             self.pieces[piece_idx].moves_left = ptype.moves_for_hits(self.pieces[piece_idx].hits);
             if ptype == PieceType::Fighter {
                 self.pieces[piece_idx].fuel = FIGHTER_FUEL;
+                let id = self.pieces[piece_idx].id;
+                self.fuel_cleared.remove(&id);
                 self.log(format!("Fighter landed at ({},{}) refueled and assigned {:?}.", p_loc.r, p_loc.c, assigned_order));
             } else {
                 self.log(format!("{:?} docked at ({},{}) and assigned {:?}.", ptype, p_loc.r, p_loc.c, assigned_order));
@@ -2632,6 +2652,7 @@ impl Game {
                 boarded_piece.moves_left = 0;
                 boarded_piece.activity = UnitActivity::Sentry; 
                 boarded_piece.fuel = FIGHTER_FUEL; // Refuel upon docking
+                self.fuel_cleared.remove(&boarded_piece.id);
                 self.pieces[carrier_idx].cargo.push(boarded_piece);
                 self.pieces[piece_idx].hits = 0; // Mark original hovering fighter for engine cleanup
                 self.log(format!("Fighter at ({},{}) immediately landed on the carrier below it.", p_loc.r, p_loc.c));
