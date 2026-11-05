@@ -10,7 +10,7 @@ rules of movement, combat and production, and a faithful translation of the orig
 computer player. It adds a modern terminal interface (panels, a scrollable message
 log, mouse support) and a short list of quality-of-life changes, all listed below.
 
-**Status: 2.0.0-alpha.2, the development line.** This branch (`2.0`) is where
+**Status: 2.0.0-alpha.3, the development line.** This branch (`2.0`) is where
 rusted-empire grows beyond the original: it will depart significantly from VMS-Empire,
 starting with a client/server split. Expect things to change and occasionally break.
 For the version true to the original, use the `main` branch and the 1.0.x releases.
@@ -115,7 +115,8 @@ The rules follow VMS-Empire 1.13. These are the deliberate changes:
   are seen only when next to something.
 - **Carriers count as bases** for fighter fuel and range warnings.
 - **Armies aboard a transport sleep until it arrives.** They come up for orders when
-  the transport finishes a standing order next to land (or when you wake it with `W`),
+  the transport finishes a standing order next to land, comes up beside a neutral or
+  enemy city (which also stops its standing order), or when you wake it with `W`,
   so a loaded transport can sail along a coast without asking about its troops every
   turn. In the original, they are asked whenever the transport is next to land.
 - **Starting continents must have an open-ocean port**, so neither side can be stuck

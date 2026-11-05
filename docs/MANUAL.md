@@ -1,6 +1,6 @@
 # rusted-empire player manual
 
-This manual covers how to play rusted-empire 2.0.0-alpha.2 (so far, the same game as 1.0). The rules are those of
+This manual covers how to play rusted-empire 2.0.0-alpha.3 (so far, the same game as 1.0). The rules are those of
 VMS-Empire; where this port differs, the text says so. The README lists all the
 differences in one place.
 
@@ -217,6 +217,10 @@ turn.
   finishes a standing order next to land (it reaches its destination, or a vector,
   explore, random or attack order stops), its armies come up on deck and are asked for
   orders. Move them ashore with the keypad.
+- **Beside a hostile city, they come up too.** When a loaded transport comes up beside a
+  neutral or enemy city (one you know about) that it wasn't already beside, whether you
+  steered it there or it was on a standing order, its armies come up on deck for orders
+  and any standing order it was on stops there.
 - **`W` on the transport unloads at any time**, wherever it is. On a carrier, `W`
   launches its fighters. Fighters never come up by themselves.
 - Units that come up on deck but stay aboard sail on with the ship, and are asked for
