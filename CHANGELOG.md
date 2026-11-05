@@ -2,6 +2,14 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## 0.9.5-beta (not yet released)
+
+### Fixed
+- **Armies slept through a hostile city.** A loaded transport that came up beside a
+  neutral or enemy city left its armies asleep in the hold unless it had finished a
+  standing order there. Now its armies come up on deck for orders whenever it comes
+  beside such a city, and a standing order it was sailing on stops there.
+
 ## 0.9.4-beta (not yet released)
 
 ### Fixed

@@ -1045,7 +1045,11 @@ impl Game {
     }
 
     pub fn attempt_move(&mut self, piece_idx: usize, target_loc: Loc) -> (MoveResult, String) {
+        let from = self.pieces[piece_idx].loc;
         let (result, mut msg) = self.attempt_move_inner(piece_idx, target_loc);
+        if result == MoveResult::Moved {
+            self.wake_armies_near_hostile_city(piece_idx, from);
+        }
         // A transport that sank, or sailed off with a full deck, leaves its armies in the sea.
         let drowned = self.drown_stranded_armies();
         if drowned > 0 {
@@ -1381,6 +1385,7 @@ impl Game {
         let mut explore_logs = Vec::new();
 
         while self.pieces[piece_idx].moves_left > 0 && self.pieces[piece_idx].hits > 0 {
+            if self.pieces[piece_idx].activity == UnitActivity::Idle { break; } // order dropped mid-move
             let ptype = self.pieces[piece_idx].ptype;
             let current_loc = self.pieces[piece_idx].loc;
             
@@ -1762,6 +1767,7 @@ impl Game {
         let sight = self.player_sight();
 
         while self.pieces[piece_idx].moves_left > 0 && self.pieces[piece_idx].hits > 0 {
+            if self.pieces[piece_idx].activity == UnitActivity::Idle { break; } // order dropped mid-move
             // Targets are enemy units in sight now, plus where the player last saw others
             // (the remembered view), as the original's attack orders work from the user's map.
             let mut enemy_locs: Vec<Loc> = self.pieces.iter().enumerate()
@@ -1919,6 +1925,7 @@ impl Game {
         let mut random_logs = Vec::new();
 
         while self.pieces[piece_idx].moves_left > 0 && self.pieces[piece_idx].hits > 0 {
+            if self.pieces[piece_idx].activity == UnitActivity::Idle { break; } // order dropped mid-move
             let ptype = self.pieces[piece_idx].ptype;
             let current_loc = self.pieces[piece_idx].loc;
             let dirs = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)];
@@ -2589,6 +2596,33 @@ impl Game {
             n, if n == 1 { what.to_string() } else if what == "army" { "armies".to_string() } else { format!("{}s", what) },
             if n == 1 { " is" } else { " are" }));
         n
+    }
+
+    /// The cities next to `loc` that the player knows to be neutral or the enemy's.
+    fn hostile_cities_next_to(&self, loc: Loc) -> Vec<Loc> {
+        self.cities.iter()
+            .filter(|c| c.loc != loc && geo_dist(self.torus, self.rows, self.cols, c.loc, loc) <= 1)
+            .filter(|c| matches!(self.known_city_owner(c, None), Some(Owner::Comp) | Some(Owner::Neutral)))
+            .map(|c| c.loc)
+            .collect()
+    }
+
+    /// A loaded transport of the player's that has just sailed from `from` up beside a
+    /// neutral or enemy city it wasn't already beside: the armies asleep in its hold come
+    /// up on deck for orders, and a standing order it was sailing on stops there.
+    fn wake_armies_near_hostile_city(&mut self, idx: usize, from: Loc) {
+        let Some(p) = self.pieces.get(idx) else { return };
+        if self.player_ai || p.owner != Owner::Player || p.hits <= 0 || p.ptype != PieceType::Transport || p.cargo.is_empty() {
+            return;
+        }
+        let loc = p.loc;
+        let before = self.hostile_cities_next_to(from);
+        let Some(city) = self.hostile_cities_next_to(loc).into_iter().find(|c| !before.contains(c)) else { return };
+        if matches!(self.pieces[idx].activity, UnitActivity::Explore | UnitActivity::Attack | UnitActivity::Random | UnitActivity::Dest(_) | UnitActivity::Dir(_, _)) {
+            self.pieces[idx].activity = UnitActivity::Idle;
+        }
+        self.log(format!("Transport at ({},{}) is beside a hostile city at ({},{}).", loc.r, loc.c, city.r, city.c));
+        self.wake_cargo(idx);
     }
 
     /// True if any square next to `loc`, or `loc` itself, is land: somewhere a transport's
