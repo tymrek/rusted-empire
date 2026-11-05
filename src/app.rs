@@ -452,9 +452,9 @@ fn edit_standing_orders(s: &mut Session, cursor: Loc) -> io::Result<()> {
     Ok(())
 }
 
-const ACTION_PROMPT: &str = "[N]ext, [A]utomove, [M]anual, [S]ave, [L]oad, [Q]uit: ";
+const ACTION_PROMPT: &str = "[N]ext, [A]utomove, [M]anual, [E]dit, [S]ave, [L]oad, [Q]uit: ";
 /// The prompt once the computer has resigned: its map can be viewed.
-const ACTION_PROMPT_RESIGNED: &str = "[N]ext, [A]utomove, [M]anual, [V]iew enemy map, [S]ave, [L]oad, [Q]uit: ";
+const ACTION_PROMPT_RESIGNED: &str = "[N]ext, [A]utomove, [M]anual, [E]dit, [V]iew enemy map, [S]ave, [L]oad, [Q]uit: ";
 
 fn action_prompt(game: &Game) -> &'static str {
     if game.comp_resigned { ACTION_PROMPT_RESIGNED } else { ACTION_PROMPT }
@@ -583,13 +583,17 @@ fn move_unit(s: &mut Session, piece_idx: usize, dir: (i32, i32)) -> io::Result<(
     if ptype == PieceType::Fighter {
         if let Some(dist) = s.game.dist_to_nearest_base(target) {
             let remaining_fuel = s.game.pieces[piece_idx].fuel - 1;
-            if remaining_fuel < dist {
+            let id = s.game.pieces[piece_idx].id;
+            // Once the player has cleared a fighter past its fuel limit, don't ask again
+            // until it lands or is lost.
+            if remaining_fuel < dist && !s.game.fuel_cleared.contains(&id) {
                 let prompt = format!("WARNING: Move leaves {} fuel, but base is {} away. Crash imminent! Proceed? [Y/N]: ", remaining_fuel, dist);
                 if !s.ask_yes_no(&prompt)? {
                     s.game.log(String::from("Fighter move cancelled due to fuel warning."));
                     s.ui.drain();
                     return Ok(());
                 }
+                s.game.fuel_cleared.insert(id);
             }
         }
     }

@@ -1,6 +1,6 @@
 # rusted-empire player manual
 
-This manual covers how to play rusted-empire 2.0.0-alpha.1 (so far, the same game as 1.0). The rules are those of
+This manual covers how to play rusted-empire 2.0.0-alpha.2 (so far, the same game as 1.0). The rules are those of
 VMS-Empire; where this port differs, the text says so. The README lists all the
 differences in one place.
 
@@ -119,6 +119,7 @@ assaults the city. If a move would destroy your own unit (an army walking into t
 sea, a ship running ashore, a fighter flying into an enemy city), you are asked to
 confirm first, in the original's words ("Troops can't walk on water, sir..."). A
 fighter also warns you if a move would leave it without enough fuel to reach a base.
+Once you say yes, it doesn't ask again for that fighter until it lands or is lost.
 
 ### Unit keys
 
@@ -143,7 +144,7 @@ orders, and the prompt says which order it was on, for example `[STUCK: Dest]`.
 ### Turn and game keys
 
 When no unit needs orders, the prompt reads
-`[N]ext, [A]utomove, [M]anual, [S]ave, [L]oad, [Q]uit`. While a unit is being asked
+`[N]ext, [A]utomove, [M]anual, [E]dit, [S]ave, [L]oad, [Q]uit`. While a unit is being asked
 about, `A`, `M`/`O`, `E` and `Q` work too; `N` and `S` mean skip and sentry there.
 
 | Key | Action |

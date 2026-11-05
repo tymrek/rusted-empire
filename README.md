@@ -10,7 +10,7 @@ rules of movement, combat and production, and a faithful translation of the orig
 computer player. It adds a modern terminal interface (panels, a scrollable message
 log, mouse support) and a short list of quality-of-life changes, all listed below.
 
-**Status: 2.0.0-alpha.1, the development line.** This branch (`2.0`) is where
+**Status: 2.0.0-alpha.2, the development line.** This branch (`2.0`) is where
 rusted-empire grows beyond the original: it will depart significantly from VMS-Empire,
 starting with a client/server split. Expect things to change and occasionally break.
 For the version true to the original, use the `main` branch and the 1.0.x releases.
@@ -66,6 +66,7 @@ See [docs/MANUAL.md](docs/MANUAL.md) for every key, the units, and the rules.
 | `--seed N` | Make a new game reproducible: the same seed gives the same world. |
 | `-t`, `--torus` | New game on a map that wraps around at its edges. |
 | `--headless` | Run AI-vs-AI test games instead of playing (see below). |
+| `--version`, `-V` | Print the version and exit. |
 
 ### Headless test rig
 
@@ -106,6 +107,8 @@ The rules follow VMS-Empire 1.13. These are the deliberate changes:
   boats and destroyers 4, carriers and battleships 5, fighters 6, satellites 10).
   In the original, everything sees only the squares next to it, and satellites see
   two.
+- **You start seeing 6 squares around your first city**, instead of only the squares
+  next to it. On a shared continent you can see the enemy's city from turn 1.
 - **Sentries wake when an enemy comes within sight**, not only when one is next to
   them. A fighter on sentry scrambles to attack.
 - **Destroyers detect submarines up to 4 squares away.** In the original, submarines
@@ -119,9 +122,9 @@ The rules follow VMS-Empire 1.13. These are the deliberate changes:
   on a continent whose only coast is a lake.
 - Cities are placed at a fixed minimum spacing, close to the original's derived value.
 
-The sight, sentry and submarine changes are under review during the beta. The
-headless rig's `--original-sight` and `--adjacent-subs` switches measure what they
-change.
+The sight (including the starting view), sentry and submarine changes are under
+review during the beta. The headless rig's `--original-sight` and `--adjacent-subs`
+switches measure what they change.
 
 **Kept on purpose, because the original does it this way:** the computer player
 ignores fighter fuel when it attacks, and the difficulty level only chooses the
