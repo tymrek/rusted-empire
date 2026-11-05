@@ -2,11 +2,45 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## 2.0.0-alpha.2 (unreleased)
+
+Brings in the fixes from the 1.x line on `main` up to 0.9.3-beta (listed under those
+versions below), including the fighter fuel warning asking only once.
+
 ## 2.0.0-alpha.1 (unreleased)
 
 The start of the 2.0 line, on the `2.0` branch: the version of rusted-empire that
 departs from the original, beginning with a client/server split. The original-faithful
 line continues on `main` as 1.0.x. So far the game is the same as 0.9.1-beta.
+
+## 0.9.3-beta (not yet released)
+
+### Fixed
+- **The fighter fuel warning kept asking.** After you said yes to flying a fighter
+  beyond its fuel limit, every further step asked again. Now it asks once; the
+  clearance lasts until the fighter lands (and refuels) or is lost, and is kept in
+  saves.
+
+## 0.9.2-beta (not yet released)
+
+### Added
+- `--version` (or `-V`) prints the version.
+
+### Fixed
+- **Losses to the computer's attacks went unreported.** When the computer's units
+  attacked yours, the result was never put in the message log: a ship or army sunk or
+  destroyed, an attack beaten off, a city lost or held, armies drowned when their
+  transport went down. All of these are now logged, with where it happened.
+- Loss and capture messages now say what went with the unit or city: the armies or
+  fighters in a sunk ship's hold, the armies killed in a captured city, and the ships
+  and fighters seized there (for either side).
+- An enemy fighter shot down over your city, or an enemy ship wrecked on its shore, is
+  now reported.
+- Satellites burning up are only reported for your own, as "Your Satellite ...": the
+  enemy's were being reported too.
+- Messages of more than one line are shown as separate lines in the message panel.
+- The turn prompt didn't list `E` (edit mode). It now reads `[N]ext, [A]utomove,
+  [M]anual, [E]dit, [S]ave, [L]oad, [Q]uit`.
 
 ## 0.9.1-beta (2026-10-24)
 

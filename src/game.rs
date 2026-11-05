@@ -61,6 +61,47 @@ pub const SAT_DIRS: [UnitActivity; 4] = [
     UnitActivity::Dir(-1, 1), UnitActivity::Dir(-1, -1), UnitActivity::Dir(1, 1), UnitActivity::Dir(1, -1),
 ];
 
+/// "1 army" or "3 armies".
+fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", n, if n == 1 { one } else { many })
+}
+
+/// "2 Fighters and 1 Destroyer": the units in `types`, counted by type.
+fn unit_list(types: &[PieceType]) -> String {
+    let mut counts: Vec<(PieceType, usize)> = Vec::new();
+    for &t in types {
+        match counts.iter_mut().find(|(p, _)| *p == t) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((t, 1)),
+        }
+    }
+    let parts: Vec<String> = counts.iter()
+        .map(|&(t, n)| format!("{} {:?}{}", n, t, if n == 1 { "" } else { "s" }))
+        .collect();
+    match parts.len() {
+        0 => String::new(),
+        1 => parts[0].clone(),
+        k => format!("{} and {}", parts[..k - 1].join(", "), parts[k - 1]),
+    }
+}
+
+/// A second line, "3 Armies aboard went down with it.", for a transport or carrier sunk
+/// with units in its hold, or "".
+fn lost_aboard(p: &Piece) -> String {
+    match p.cargo.len() {
+        0 => String::new(),
+        n => {
+            let what = match (p.cargo[0].ptype, n) {
+                (PieceType::Army, 1) => "Army",
+                (PieceType::Army, _) => "Armies",
+                (_, 1) => "Fighter",
+                _ => "Fighters",
+            };
+            format!("\n{} {} aboard went down with it.", n, what)
+        }
+    }
+}
+
 /// The work a city starts from when it switches to building `prod`: the original charges a
 /// fifth of the build time to retool (`work = -(build_time / 5)`), and progress on the
 /// old item is lost.
@@ -180,6 +221,10 @@ pub struct Game {
     /// `-t`: the playable map wraps around at its top, bottom, left and right edges.
     #[serde(default)]
     pub torus: bool,
+    /// Ids of the player's fighters that were cleared to fly beyond their fuel limit.
+    /// The fuel warning is not asked again for them until they land (refuel) or are lost.
+    #[serde(default)]
+    pub fuel_cleared: std::collections::HashSet<usize>,
 }
 
 impl Game {
@@ -215,6 +260,7 @@ impl Game {
             rng: fresh_rng(),
             moved_this_turn: std::collections::HashSet::new(),
             torus: false,
+            fuel_cleared: std::collections::HashSet::new(),
             default_orders: vec![
                 (PieceType::Army, UnitActivity::Idle),
                 (PieceType::Fighter, UnitActivity::Idle),
@@ -817,15 +863,21 @@ impl Game {
         self.pieces[piece_idx].hits = 0;
 
         if self.rng.gen_bool(0.5) {
+            // What the city's previous owner loses with it.
+            let (mut armies_killed, mut seized) = (0, Vec::new());
             for p in self.pieces.iter_mut() {
                 if p.loc != loc || p.hits <= 0 || p.ptype == PieceType::Satellite || p.owner != city_owner {
                     continue;
                 }
                 if p.ptype == PieceType::Army {
                     p.hits = 0;
+                    armies_killed += 1;
                     continue;
                 }
+                seized.push(p.ptype);
                 if p.ptype == PieceType::Transport {
+                    // The armies in its hold go down with the city's other armies.
+                    armies_killed += p.cargo.len();
                     p.cargo.clear();
                 } else {
                     for c in p.cargo.iter_mut() {
@@ -856,11 +908,27 @@ impl Game {
 
             if is_player {
                 self.reveal_vision(loc, ptype.sight_range());
-                (MoveResult::CityCaptured(c_idx), format!(">>> CITY CAPTURED! You took ({},{})! <<<", loc.r, loc.c))
+                let mut msg = format!(">>> CITY CAPTURED! You took ({},{})! <<<", loc.r, loc.c);
+                if armies_killed > 0 {
+                    msg += &format!("\n{} in it {} killed.", count_of(armies_killed, "enemy army", "enemy armies"),
+                        if armies_killed == 1 { "was" } else { "were" });
+                }
+                if !seized.is_empty() {
+                    msg += &format!("\nYou seized {}.", unit_list(&seized));
+                }
+                (MoveResult::CityCaptured(c_idx), msg)
             } else if was_friendly {
                 // The player is told, so the map shows the loss even out of sight.
                 self.cities[c_idx].seen_owner = Some(unit_owner);
-                (MoveResult::CityCaptured(c_idx), format!(">>> ALERT! The enemy captured your city at ({},{})! <<<", loc.r, loc.c))
+                let mut msg = format!(">>> ALERT! The enemy captured your city at ({},{})! <<<", loc.r, loc.c);
+                if armies_killed > 0 {
+                    msg += &format!("\n{} of your armies in it {} killed.", armies_killed,
+                        if armies_killed == 1 { "was" } else { "were" });
+                }
+                if !seized.is_empty() {
+                    msg += &format!("\nThe enemy seized {}.", unit_list(&seized));
+                }
+                (MoveResult::CityCaptured(c_idx), msg)
             } else {
                 (MoveResult::CityCaptured(c_idx), String::new())
             }
@@ -1012,8 +1080,14 @@ impl Game {
             if ptype == PieceType::Fighter {
                 self.fighter_stats_mut(unit_owner).lost_over_city += 1;
             }
+            let players_city = self.cities.iter().any(|c| c.loc == target_loc && c.owner == Owner::Player);
             let msg = if !is_player {
-                String::new()
+                if players_city {
+                    let fate = if ptype == PieceType::Fighter { "was shot down over" } else { "broke up on the shore of" };
+                    format!(">>> DEFENSE! An enemy {:?} {} your city at ({},{})! <<<", ptype, fate, target_loc.r, target_loc.c)
+                } else {
+                    String::new()
+                }
             } else if ptype == PieceType::Fighter {
                 format!(">>> Your Fighter was shot down over the city at ({},{})! <<<", target_loc.r, target_loc.c)
             } else {
@@ -1073,6 +1147,7 @@ impl Game {
                 let fuel_left = boarded_piece.fuel - 1;
                 self.note_landing(unit_owner, fuel_left);
                 boarded_piece.fuel = FIGHTER_FUEL;
+                self.fuel_cleared.remove(&boarded_piece.id);
             }
             self.pieces[carrier_idx].cargo.push(boarded_piece);
             self.pieces[piece_idx].hits = 0;
@@ -1141,10 +1216,17 @@ impl Game {
                 else if unit_owner == Owner::Comp { self.comp_score += e_type.build_cost() as u32; }
             }
 
+            let (tr, tc) = (target_loc.r, target_loc.c);
             if self.pieces[piece_idx].hits <= 0 {
-                let msg = if is_player { format!(">>> DEFEAT! Your {:?} was DESTROYED by enemy {:?}! <<<", ptype, e_type) } 
-                          else if attacked_player { format!(">>> DEFENSE! Your {:?} DESTROYED attacking enemy {:?}! <<<", e_type, ptype) } 
-                          else { String::new() };
+                let msg = if is_player {
+                    let aboard = lost_aboard(&self.pieces[piece_idx]);
+                    format!(">>> DEFEAT! Your {:?} was DESTROYED by enemy {:?} at ({},{})! <<<{}", ptype, e_type, tr, tc, aboard)
+                } else if attacked_player {
+                    let aboard = lost_aboard(&self.pieces[piece_idx]);
+                    format!(">>> DEFENSE! Your {:?} at ({},{}) destroyed an attacking enemy {:?}! <<<{}", e_type, tr, tc, ptype, aboard)
+                } else {
+                    String::new()
+                };
                 return (MoveResult::CombatLost, msg);
             } else {
                 // If another enemy still holds the sector (an air unit over a ground unit, or the
@@ -1177,8 +1259,14 @@ impl Game {
                     let fate = if ptype == PieceType::Army { "drowned" } else { "broke up on shore" };
                     format!(">>> VICTORY! Your {:?} DESTROYED enemy {:?}, then {} after its assault! <<<", ptype, e_type, fate)
                 }
-                              else if is_player { format!(">>> VICTORY! Your {:?} DESTROYED enemy {:?}! <<<", ptype, e_type) }
-                              else if attacked_player { format!(">>> ALERT! Your {:?} was DESTROYED by enemy {:?}! <<<", e_type, ptype) }
+                              else if is_player {
+                                  let aboard = lost_aboard(&self.pieces[e_idx]);
+                                  format!(">>> VICTORY! Your {:?} DESTROYED enemy {:?} at ({},{})! <<<{}", ptype, e_type, tr, tc, aboard)
+                              }
+                              else if attacked_player {
+                                  let aboard = lost_aboard(&self.pieces[e_idx]);
+                                  format!(">>> ALERT! Your {:?} at ({},{}) was DESTROYED by enemy {:?}! <<<{}", e_type, tr, tc, ptype, aboard)
+                              }
                               else { String::new() };
 
                 if others_remain && is_player {
@@ -1196,6 +1284,8 @@ impl Game {
                         let fuel_left = self.pieces[piece_idx].fuel;
                         self.note_landing(unit_owner, fuel_left);
                         self.pieces[piece_idx].fuel = FIGHTER_FUEL;
+                        let id = self.pieces[piece_idx].id;
+                        self.fuel_cleared.remove(&id);
                         self.pieces[piece_idx].moves_left = 0;
                     } else if self.pieces[piece_idx].fuel <= 0 {
                         self.pieces[piece_idx].hits = 0;
@@ -1243,6 +1333,8 @@ impl Game {
                 let fuel_left = self.pieces[piece_idx].fuel;
                 self.note_landing(unit_owner, fuel_left);
                 self.pieces[piece_idx].fuel = FIGHTER_FUEL;
+                let id = self.pieces[piece_idx].id;
+                self.fuel_cleared.remove(&id);
                 self.pieces[piece_idx].moves_left = 0;
             } else if self.pieces[piece_idx].fuel <= 0 {
                 self.pieces[piece_idx].hits = 0;
@@ -1520,6 +1612,14 @@ impl Game {
             }
         }
         self.moved_this_turn.clear();
+        // Forget fuel clearances for fighters that have been lost.
+        if !self.fuel_cleared.is_empty() {
+            let alive: std::collections::HashSet<usize> = self.pieces.iter()
+                .filter(|p| p.hits > 0)
+                .flat_map(|p| std::iter::once(p.id).chain(p.cargo.iter().map(|c| c.id)))
+                .collect();
+            self.fuel_cleared.retain(|id| alive.contains(id));
+        }
 
         for (idx, p) in self.pieces.iter_mut().enumerate() {
             if p.owner == Owner::Player || p.owner == Owner::Comp {
@@ -1628,7 +1728,10 @@ impl Game {
                 p.fuel -= 1; 
                 if p.fuel <= 0 {
                     p.hits = 0;
-                    dead_sats.push(format!("Satellite at ({},{}) burned up in the atmosphere.", p.loc.r, p.loc.c));
+                    // Only the player's own: the enemy's satellites are its business.
+                    if p.owner == Owner::Player {
+                        dead_sats.push(format!("Your Satellite at ({},{}) burned up in the atmosphere.", p.loc.r, p.loc.c));
+                    }
                 }
             }
         }
@@ -2191,11 +2294,16 @@ impl Game {
         }
     }
 
+    /// Adds `msg` to the message log. A message of several lines (joined with `\n`) is
+    /// logged as one entry per line, since the message panel shows one line per entry.
     pub fn log(&mut self, msg: String) {
-        self.messages.push(msg);
-        self.messages_logged += 1;
+        for line in msg.split('\n').map(str::trim_end).filter(|l| !l.trim().is_empty()) {
+            self.messages.push(line.trim_start().to_string());
+            self.messages_logged += 1;
+        }
         if self.messages.len() > MAX_MESSAGES {
-            self.messages.remove(0);
+            let excess = self.messages.len() - MAX_MESSAGES;
+            self.messages.drain(..excess);
         }
     }
 
@@ -2529,6 +2637,8 @@ impl Game {
             self.pieces[piece_idx].moves_left = ptype.moves_for_hits(self.pieces[piece_idx].hits);
             if ptype == PieceType::Fighter {
                 self.pieces[piece_idx].fuel = FIGHTER_FUEL;
+                let id = self.pieces[piece_idx].id;
+                self.fuel_cleared.remove(&id);
                 self.log(format!("Fighter landed at ({},{}) refueled and assigned {:?}.", p_loc.r, p_loc.c, assigned_order));
             } else {
                 self.log(format!("{:?} docked at ({},{}) and assigned {:?}.", ptype, p_loc.r, p_loc.c, assigned_order));
@@ -2542,6 +2652,7 @@ impl Game {
                 boarded_piece.moves_left = 0;
                 boarded_piece.activity = UnitActivity::Sentry; 
                 boarded_piece.fuel = FIGHTER_FUEL; // Refuel upon docking
+                self.fuel_cleared.remove(&boarded_piece.id);
                 self.pieces[carrier_idx].cargo.push(boarded_piece);
                 self.pieces[piece_idx].hits = 0; // Mark original hovering fighter for engine cleanup
                 self.log(format!("Fighter at ({},{}) immediately landed on the carrier below it.", p_loc.r, p_loc.c));

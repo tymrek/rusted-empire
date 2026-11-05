@@ -23,6 +23,11 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("rs-empire {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+
     let value_of = |flags: &[&str]| {
         args.iter().position(|a| flags.contains(&a.as_str())).and_then(|i| args.get(i + 1)).cloned()
     };
