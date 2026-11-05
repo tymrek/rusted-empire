@@ -1,6 +1,6 @@
 [package]
 name = "rs-empire"
-version = "0.9.3-beta"
+version = "0.9.5-beta"
 license = "GPL-2.0-only"
 edition = "2021"
 rust-version = "1.75"

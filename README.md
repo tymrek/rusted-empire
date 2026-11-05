@@ -137,7 +137,8 @@ The rules follow VMS-Empire 1.13. These are the deliberate changes:
   are seen only when next to something.
 - **Carriers count as bases** for fighter fuel and range warnings.
 - **Armies aboard a transport sleep until it arrives.** They come up for orders when
-  the transport finishes a standing order next to land (or when you wake it with `W`),
+  the transport finishes a standing order next to land, comes up beside a neutral or
+  enemy city (which also stops its standing order), or when you wake it with `W`,
   so a loaded transport can sail along a coast without asking about its troops every
   turn. In the original, they are asked whenever the transport is next to land.
 - **Starting continents must have an open-ocean port**, so neither side can be stuck
