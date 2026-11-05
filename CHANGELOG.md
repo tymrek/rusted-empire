@@ -2,6 +2,14 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## 0.9.3-beta (not yet released)
+
+### Fixed
+- **The fighter fuel warning kept asking.** After you said yes to flying a fighter
+  beyond its fuel limit, every further step asked again. Now it asks once; the
+  clearance lasts until the fighter lands (and refuels) or is lost, and is kept in
+  saves.
+
 ## 0.9.2-beta (not yet released)
 
 ### Added

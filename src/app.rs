@@ -587,13 +587,17 @@ fn move_unit(s: &mut Session, piece_idx: usize, dir: (i32, i32)) -> io::Result<(
     if ptype == PieceType::Fighter {
         if let Some(dist) = s.game.dist_to_nearest_base(target) {
             let remaining_fuel = s.game.pieces[piece_idx].fuel - 1;
-            if remaining_fuel < dist {
+            let id = s.game.pieces[piece_idx].id;
+            // Once the player has cleared a fighter past its fuel limit, don't ask again
+            // until it lands or is lost.
+            if remaining_fuel < dist && !s.game.fuel_cleared.contains(&id) {
                 let prompt = format!("WARNING: Move leaves {} fuel, but base is {} away. Crash imminent! Proceed? [Y/N]: ", remaining_fuel, dist);
                 if !s.ask_yes_no(&prompt)? {
                     s.game.log(String::from("Fighter move cancelled due to fuel warning."));
                     s.ui.drain();
                     return Ok(());
                 }
+                s.game.fuel_cleared.insert(id);
             }
         }
     }
