@@ -1267,6 +1267,82 @@ mod tests {
     }
 
     #[test]
+    fn test_fighter_that_sinks_a_transport_moves_in_over_its_drowning_armies() {
+        let mut game = Game::new(10, 10, 50);
+        game.map = vec![vec![Terrain::Sea; 10]; 10];
+        let mut fighter = test_piece(1, PieceType::Fighter, Owner::Player, 5, 5);
+        fighter.hits = 1000;
+        game.pieces.push(fighter);
+        let mut transport = test_piece(2, PieceType::Transport, Owner::Comp, 5, 6);
+        transport.hits = 1;
+        game.pieces.push(transport);
+        // an army awake on the transport's deck
+        game.pieces.push(test_piece(3, PieceType::Army, Owner::Comp, 5, 6));
+        let (result, _) = game.attempt_move(0, Loc { r: 5, c: 6 });
+        assert_eq!(result, MoveResult::CombatWon);
+        assert!(game.pieces[1].hits <= 0, "the transport is sunk");
+        assert!(game.pieces[2].hits <= 0, "its army drowns");
+        assert_eq!(game.pieces[0].loc, Loc { r: 5, c: 6 }, "the fighter moves into the sector");
+    }
+
+    /// Open sea with a single land square at (5,8) holding a city of `city_owner`, and a
+    /// loaded transport of the player's at (5,5) with two armies asleep in its hold.
+    fn transport_near_city(city_owner: Owner) -> Game {
+        let mut game = Game::new(10, 12, 50);
+        game.map = vec![vec![Terrain::Sea; 12]; 10];
+        game.map[5][8] = Terrain::Land;
+        game.cities.push(City {
+            loc: Loc { r: 5, c: 8 }, owner: city_owner, prod: PieceType::Army, work: 0,
+            default_orders: Vec::new(), seen_owner: None,
+        });
+        let mut t = test_piece(1, PieceType::Transport, Owner::Player, 5, 5);
+        for id in [2, 3] {
+            let mut a = test_piece(id, PieceType::Army, Owner::Player, 5, 5);
+            a.activity = UnitActivity::Sentry;
+            t.cargo.push(a);
+        }
+        game.pieces.push(t);
+        game
+    }
+
+    #[test]
+    fn test_armies_wake_when_their_transport_comes_beside_a_hostile_city() {
+        for owner in [Owner::Comp, Owner::Neutral] {
+            let mut game = transport_near_city(owner);
+            game.attempt_move(0, Loc { r: 5, c: 6 });
+            assert_eq!(game.pieces[0].cargo.len(), 2, "{:?}: not beside the city yet", owner);
+            game.attempt_move(0, Loc { r: 5, c: 7 });
+            assert!(game.pieces[0].cargo.is_empty(), "{:?}: armies brought up", owner);
+            let deck: Vec<_> = game.pieces.iter().filter(|p| p.ptype == PieceType::Army).collect();
+            assert_eq!(deck.len(), 2);
+            assert!(deck.iter().all(|a| a.activity == UnitActivity::Idle && a.loc == Loc { r: 5, c: 7 }));
+        }
+    }
+
+    #[test]
+    fn test_armies_stay_asleep_beside_your_own_city() {
+        let mut game = transport_near_city(Owner::Player);
+        game.attempt_move(0, Loc { r: 5, c: 6 });
+        game.attempt_move(0, Loc { r: 5, c: 7 });
+        assert_eq!(game.pieces[0].cargo.len(), 2);
+    }
+
+    #[test]
+    fn test_transport_sailing_past_a_hostile_city_stops_beside_it() {
+        let mut game = transport_near_city(Owner::Comp);
+        // a one-square-wide channel along row 4 runs past the city at (5,8)
+        game.map = vec![vec![Terrain::Land; 12]; 10];
+        game.map[4] = vec![Terrain::Sea; 12];
+        game.pieces[0].loc = Loc { r: 4, c: 5 };
+        game.pieces[0].activity = UnitActivity::Dest(Loc { r: 4, c: 11 });
+        game.dest_piece(0);
+        let t = &game.pieces[0];
+        assert!(t.cargo.is_empty(), "armies brought up: at {:?}, {:?}", t.loc, game.messages);
+        assert_eq!(t.loc, Loc { r: 4, c: 7 }, "stopped at the first square beside the city");
+        assert_eq!(t.activity, UnitActivity::Idle, "route cancelled");
+    }
+
+    #[test]
     fn test_army_that_loses_at_sea_is_destroyed() {
         let mut game = sea_world(1);
         let mut ship = test_piece(2, PieceType::Battleship, Owner::Comp, 5, 6);
