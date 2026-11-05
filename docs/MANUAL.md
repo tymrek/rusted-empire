@@ -119,6 +119,7 @@ assaults the city. If a move would destroy your own unit (an army walking into t
 sea, a ship running ashore, a fighter flying into an enemy city), you are asked to
 confirm first, in the original's words ("Troops can't walk on water, sir..."). A
 fighter also warns you if a move would leave it without enough fuel to reach a base.
+Once you say yes, it doesn't ask again for that fighter until it lands or is lost.
 
 ### Unit keys
 
