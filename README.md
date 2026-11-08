@@ -60,7 +60,8 @@ The `wasm` branch builds the same game for the web: the identical game code comp
 WebAssembly, with the screen drawn on a page instead of a terminal. Keys, the mouse
 and saving all work as in the terminal; saves stay in your browser's local storage.
 
-- **Online:** https://tymrek.github.io/rusted-empire/ (published from the `wasm` branch).
+- **Online:** https://www.kermyt.com/, with a mirror at
+  https://tymrek.github.io/rusted-empire/ (both published from the `wasm` branch).
   `?seed=N` in the address gives a reproducible world, and `?torus` a wrap-around map.
 - **The Menu button** (bottom right) shows the version, the commit it was built from
   and the world's seed, with a link that replays the same map. From it you can
