@@ -77,8 +77,16 @@ and saving all work as in the terminal; saves stay in your browser's local stora
   ```
   The page has to come from a web server; opening the file directly won't work.
 
-Tested in Chromium; it should work in any current desktop browser (Firefox, Chrome,
-Edge, Safari). It needs a keyboard, so it isn't playable on phones.
+Tested in Chromium; it should work in any current browser (Firefox, Chrome, Edge,
+Safari).
+
+**On a phone or tablet** a keypad appears beside the screen: the eight directions
+(the middle button is Space, skip), the common commands `N S G Y W E`, Esc, Backspace
+and Enter, `☰` for the menu, and `⌨` to bring up the phone's keyboard for everything
+else. Drag with one finger to look around the map, and with two fingers up or down to
+scroll the messages. The screen shrinks its lettering to fit the whole game; holding
+the phone sideways gives the biggest. `?touch=1` or `?touch=0` turns the keypad on or
+off whatever the device.
 
 ## Command-line options
 

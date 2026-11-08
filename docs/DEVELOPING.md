@@ -376,6 +376,21 @@ question can't be exported. "Load a saved game" checks the file looks like a sav
 stores it as `empire.sav` in local storage and reloads; the player then presses `L`.
 The keyboard is not passed to the game while the menu is open.
 
+**Screen size and touch.** `fit()` in `main.js` picks the largest font, up to 16px, at
+which the game's smallest layout (72 x 24 cells: the 40-column map beside the
+30-column panel, over the messages and prompt) fits the space it has, so small windows
+and phones get the whole game in smaller lettering. Cells are whole device pixels, so
+they join without seams. On a touch screen (`pointer: coarse`, or `?touch=1`) the page
+shows the keypad (`#touch` in `index.html`) along the bottom, or down the right side
+when sideways, and the game gets the rest, measured from the visible viewport so it
+also refits when the phone's keyboard comes up. Keypad buttons push the same events
+the keyboard would; they act on `pointerdown` so they don't take the focus (and close
+the phone's keyboard). `⌨` focuses a hidden text box: phones often report typed keys
+as "Unidentified", so the page watches what changes in the box instead and sends the
+difference (a marker in the box gives backspace something to delete). One finger on
+the screen is the left mouse button (tap, drag to pan); two fingers dragged up or down
+become wheel events for the message log.
+
 **Shared memory needs a "cross-origin isolated" page**, which normally means two
 response headers. GitHub Pages can't send headers, so `coi-sw.js` is a small service
 worker that adds them; on the first visit the page registers it and reloads once.
