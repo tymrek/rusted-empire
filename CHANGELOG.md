@@ -2,7 +2,10 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
-## 0.9.6-beta (not yet released)
+## 0.9.6-beta (2026-11-08)
+
+The first release since 0.9.1-beta: it brings together 0.9.2-beta to 0.9.5-beta,
+listed below, which weren't released on their own.
 
 ### Added
 - **The browser version works on phones and tablets.** The screen shrinks its
@@ -13,7 +16,7 @@ All notable changes to rusted-empire. Versions follow the repository's tags.
   the first key or tap. Small desktop windows get smaller lettering too, rather than
   losing the side panel.
 
-## 0.9.5-beta (not yet released)
+## 0.9.5-beta (not released on its own; in 0.9.6-beta)
 
 ### Fixed
 - **Armies slept through a hostile city.** A loaded transport that came up beside a
@@ -21,7 +24,7 @@ All notable changes to rusted-empire. Versions follow the repository's tags.
   standing order there. Now its armies come up on deck for orders whenever it comes
   beside such a city, and a standing order it was sailing on stops there.
 
-## 0.9.4-beta (not yet released)
+## 0.9.4-beta (not released on its own; in 0.9.6-beta)
 
 ### Fixed
 - **A unit that sank a transport didn't move into its square.** Armies left on the
@@ -29,7 +32,7 @@ All notable changes to rusted-empire. Versions follow the repository's tags.
   say) stayed where it was, even though those armies then drowned. Armies stranded in
   open sea no longer hold a square.
 
-## 0.9.3-beta (not yet released)
+## 0.9.3-beta (not released on its own; in 0.9.6-beta)
 
 ### Fixed
 - **The fighter fuel warning kept asking.** After you said yes to flying a fighter
@@ -37,7 +40,7 @@ All notable changes to rusted-empire. Versions follow the repository's tags.
   clearance lasts until the fighter lands (and refuels) or is lost, and is kept in
   saves.
 
-## 0.9.2-beta (not yet released)
+## 0.9.2-beta (not released on its own; in 0.9.6-beta)
 
 ### Added
 - `--version` (or `-V`) prints the version.
