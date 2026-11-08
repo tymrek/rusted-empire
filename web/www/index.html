@@ -41,6 +41,43 @@
     #menu button:hover, #menu a.action:hover { background: #4a7ab8; }
     #menu a { color: #729fcf; }
     #menu .hint { font-size: 12px; color: #babdb6; margin: 0 0 .3em; }
+    #menu { max-height: calc(100% - 50px); overflow-y: auto; box-sizing: border-box; }
+
+    /* Touch screens: the screen takes what the keypad leaves, and taps and drags on it
+       go to the game rather than scrolling or zooming the page. */
+    canvas { touch-action: none; -webkit-user-select: none; user-select: none; }
+    #touch { display: none; }
+    body.touch #touch {
+      display: flex; position: fixed; box-sizing: border-box; gap: 6px; padding: 6px;
+      background: #1a1a1a; border-top: 1px solid #333; touch-action: manipulation;
+      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    }
+    /* Upright: the keypad is a strip along the bottom, directions on the left. */
+    body.touch.portrait #touch { left: 0; right: 0; bottom: 0; flex-direction: row; justify-content: space-between; }
+    /* Sideways: a column on the right. */
+    body.touch.landscape #touch {
+      top: 0; right: 0; bottom: 0; width: 156px; flex-direction: column-reverse;
+      justify-content: space-between; border-top: 0; border-left: 1px solid #333;
+    }
+    #touch .pad { display: grid; gap: 4px; grid-template-columns: repeat(3, 1fr); }
+    body.touch.portrait #touch .dirs { width: 46%; }
+    body.touch.portrait #touch .cmds { width: 52%; grid-template-columns: repeat(4, 1fr); }
+    #touch button {
+      min-height: 40px; padding: 0; border: 1px solid #555753; border-radius: 6px;
+      background: #2e3436; color: #eeeeec; font: 600 15px system-ui, sans-serif;
+      touch-action: manipulation;
+    }
+    body.touch.landscape #touch button { min-height: 34px; font-size: 14px; }
+    #touch .dirs button { background: #24343f; font-size: 18px; }
+    #touch button.wide { grid-column: span 2; }
+    #touch button.on, #touch button:active { background: #3465a4; }
+    body.touch #menu-button { display: none; }
+    body.touch #notice { top: 40%; font-size: 14px; }
+    /* Brings up the phone's own keyboard: focused, it receives what's typed. */
+    #kbd {
+      position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0;
+      border: 0; padding: 0; font-size: 16px; /* 16px stops iOS zooming in on focus */
+    }
   </style>
 </head>
 <body>
@@ -61,6 +98,36 @@
     <div class="facts"><a href="https://github.com/tymrek/rusted-empire" target="_blank" rel="noopener">Source code and license (GPL v2)</a></div>
   </div>
   <input id="menu-file" type="file" accept=".json,.sav,application/json" hidden>
+  <!-- Touch screens: a keypad for moving and the commonest keys; ⌨ brings up the
+       phone's keyboard for the rest. data-key is the key it presses. -->
+  <div id="touch" aria-label="Keypad">
+    <div class="pad dirs">
+      <button data-key="7" data-repeat aria-label="Up and left">↖</button>
+      <button data-key="8" data-repeat aria-label="Up">↑</button>
+      <button data-key="9" data-repeat aria-label="Up and right">↗</button>
+      <button data-key="4" data-repeat aria-label="Left">←</button>
+      <button data-key=" " aria-label="Skip (space)">·</button>
+      <button data-key="6" data-repeat aria-label="Right">→</button>
+      <button data-key="1" data-repeat aria-label="Down and left">↙</button>
+      <button data-key="2" data-repeat aria-label="Down">↓</button>
+      <button data-key="3" data-repeat aria-label="Down and right">↘</button>
+    </div>
+    <div class="pad cmds">
+      <button data-key="n">N</button>
+      <button data-key="s">S</button>
+      <button data-key="g">G</button>
+      <button data-key="y">Y</button>
+      <button data-key="w">W</button>
+      <button data-key="e">E</button>
+      <button data-key="Escape">Esc</button>
+      <button data-key="Backspace" aria-label="Backspace">⌫</button>
+      <button id="touch-menu" aria-label="Menu">☰</button>
+      <button data-key="Enter" class="wide">Enter</button>
+      <button id="kbd-button" aria-label="Keyboard" title="Bring up the keyboard">⌨</button>
+    </div>
+  </div>
+  <input id="kbd" type="text" autocomplete="off" autocorrect="off" autocapitalize="off"
+         spellcheck="false" enterkeyhint="send" aria-label="Keyboard input to the game" tabindex="-1">
   <noscript><p style="color:#eee;font:16px sans-serif;padding:2em">rusted-empire needs JavaScript to run in the browser.</p></noscript>
   <script type="module" src="main.js"></script>
 </body>

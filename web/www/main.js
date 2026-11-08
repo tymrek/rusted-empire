@@ -14,7 +14,11 @@
 
 const HEAD = 0, TAIL = 1, COLS = 2, ROWS = 3, SIGNAL = 4, RING = 16, SLOT = 6, CAPACITY = 256;
 const SAVE_PREFIX = "rs-empire:";
-const FONT_PX = 16;
+const FONT_PX = 16;  // the largest font; smaller screens get a smaller one
+const MIN_FONT_PX = 6;
+// The smallest screen the game's layout fits (a 40-column map beside the 30-column
+// panel, over the message log and prompt), in character cells.
+const MIN_COLS = 72, MIN_ROWS = 24;
 const FONT_FAMILY = '"DejaVu Sans Mono", "Menlo", "Consolas", "Liberation Mono", monospace';
 
 // ratatui's named colours, in its order (web.rs `color_code` 1-16), Tango palette.
@@ -31,13 +35,14 @@ const ctx = canvas.getContext("2d");
 const notice = document.getElementById("notice");
 
 let ctl = null;
-let cellW = 9, cellH = 20;
+let cellW = 9, cellH = 20, fontPx = FONT_PX;
 let lastFrame = null;
 let dragging = null; // the mouse button held down, if any
 let lastCell = null;
 
 const SOURCE_URL = "https://github.com/tymrek/rusted-empire";
 let noticeTimer = null;
+let noticeFleeting = false; // a passing message, cleared by the next key or tap
 
 // Shows a message over the game; `withSource` adds the link to the source code (the
 // game is GPL software). A message with `seconds` disappears by itself.
@@ -54,6 +59,7 @@ function say(message, isError, withSource, seconds) {
   }
   notice.className = isError ? "error" : "";
   notice.hidden = !message;
+  noticeFleeting = !!seconds && !isError;
   if (seconds) noticeTimer = setTimeout(() => { notice.hidden = true; }, seconds * 1000);
 }
 
@@ -74,21 +80,51 @@ function color(code, fallback) {
 
 // ---- screen size ---------------------------------------------------------------
 
-function measure() {
-  ctx.font = `${FONT_PX}px ${FONT_FAMILY}`;
-  cellW = Math.ceil(ctx.measureText("M").width);
-  cellH = Math.ceil(FONT_PX * 1.25);
+// The largest font (up to FONT_PX) at which the game's smallest layout fits in w x h,
+// with cells a whole number of device pixels so they line up without seams.
+function measure(w, h) {
+  const dpr = window.devicePixelRatio || 1;
+  for (let px = FONT_PX; px >= MIN_FONT_PX; px -= 0.5) {
+    ctx.font = `${px}px ${FONT_FAMILY}`;
+    const cw = Math.ceil(ctx.measureText("M").width * dpr) / dpr;
+    const ch = Math.ceil(px * 1.25 * dpr) / dpr;
+    fontPx = px; cellW = cw; cellH = ch;
+    if (Math.floor(w / cw) >= MIN_COLS && Math.floor(h / ch) >= MIN_ROWS) return;
+  }
+}
+
+// Touch screens get the keypad (see index.html). ?touch=1 or ?touch=0 forces it on or off.
+const touchParam = new URLSearchParams(location.search).get("touch");
+const touchUi = touchParam !== null ? touchParam === "1"
+  : window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0 && !window.matchMedia("(pointer: fine)").matches;
+const touchPanel = document.getElementById("touch");
+if (touchUi) document.body.classList.add("touch");
+
+// The part of the window the game can use: the visible area (which shrinks when a
+// phone's keyboard is up), less the keypad.
+function gameArea() {
+  const vv = window.visualViewport;
+  let w = vv ? vv.width : window.innerWidth, h = vv ? vv.height : window.innerHeight;
+  if (touchUi) {
+    const landscape = window.innerWidth > window.innerHeight;
+    document.body.classList.toggle("landscape", landscape);
+    document.body.classList.toggle("portrait", !landscape);
+    const r = touchPanel.getBoundingClientRect();
+    if (landscape) w = Math.min(w, r.left);
+    else h = Math.min(h, r.top);
+  }
+  return [Math.max(1, Math.floor(w)), Math.max(1, Math.floor(h))];
 }
 
 function fit() {
   const dpr = window.devicePixelRatio || 1;
-  const w = window.innerWidth, h = window.innerHeight;
+  const [w, h] = gameArea();
   canvas.style.width = w + "px";
   canvas.style.height = h + "px";
   canvas.width = Math.floor(w * dpr);
   canvas.height = Math.floor(h * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  measure();
+  measure(w, h);
   const cols = Math.max(20, Math.floor(w / cellW));
   const rows = Math.max(10, Math.floor(h / cellH));
   if (ctl) {
@@ -117,12 +153,12 @@ function paint(f) {
       if (bg) { ctx.fillStyle = bg; ctx.fillRect(x, y, cellW, cellH); }
       const ch = f.chars[i];
       if (ch === 32 || ch === 0 || (m & HIDDEN)) continue;
-      ctx.font = `${m & ITALIC ? "italic " : ""}${m & BOLD ? "bold " : ""}${FONT_PX}px ${FONT_FAMILY}`;
+      ctx.font = `${m & ITALIC ? "italic " : ""}${m & BOLD ? "bold " : ""}${fontPx}px ${FONT_FAMILY}`;
       ctx.globalAlpha = m & DIM ? 0.6 : 1;
       ctx.fillStyle = fg;
       const s = String.fromCodePoint(ch);
       if (s === "█") ctx.fillRect(x, y, cellW, cellH); // a solid block fills the cell exactly
-      else if (!drawBox(ch, x, y)) ctx.fillText(s, x, y + 2);
+      else if (!drawBox(ch, x, y)) ctx.fillText(s, x, y + cellH * 0.1);
       if (m & UNDERLINED) ctx.fillRect(x, y + cellH - 2, cellW, 1);
     }
   }
@@ -167,6 +203,7 @@ function wake() {
 }
 
 function send(ev) {
+  if (noticeFleeting) { noticeFleeting = false; notice.hidden = true; }
   const head = Atomics.load(ctl, HEAD), tail = Atomics.load(ctl, TAIL);
   if (head - tail >= CAPACITY) return; // the game is far behind: drop the event
   const at = RING + (head % CAPACITY) * SLOT;
@@ -242,6 +279,140 @@ window.addEventListener("mouseup", (e) => {
 
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
+// ---- touch ---------------------------------------------------------------------
+// One finger works like the left mouse button: a tap clicks, a drag pans the map. Two
+// fingers dragged up or down scroll the message log, like the mouse wheel.
+
+const touches = new Map(); // pointerId -> [x, y] of the fingers on the screen
+let touchMode = null;      // "drag" (one finger) or "scroll" (two), while fingers are down
+let scrollY = 0;           // where the two fingers were at the last scroll step
+
+function fingersY() {
+  let y = 0;
+  for (const [, p] of touches) y += p[1];
+  return y / touches.size;
+}
+
+// Taps would also arrive as mouse events; the touch handlers below deal with them.
+canvas.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse") return;
+  e.preventDefault();
+  if (!menu.hidden) closeMenu();
+  if (!ctl) return;
+  canvas.setPointerCapture(e.pointerId);
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  const [c, r] = cellAt(e);
+  if (touches.size === 1) {
+    touchMode = "drag";
+    lastCell = c + "," + r;
+    send([2, 0, 0, c, r, 0]);
+  } else if (touchMode === "drag") {
+    // A second finger: stop panning and scroll the messages instead.
+    send([2, 1, 0, c, r, 0]);
+    touchMode = "scroll";
+    scrollY = fingersY();
+  }
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (e.pointerType === "mouse" || !touches.has(e.pointerId) || !ctl) return;
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  if (touchMode === "drag") {
+    const [c, r] = cellAt(e);
+    if (c + "," + r === lastCell) return;
+    lastCell = c + "," + r;
+    send([2, 2, 0, c, r, 0]);
+  } else if (touchMode === "scroll") {
+    const [c, r] = cellAt(e);
+    // Fingers moving down bring older messages into view, as on any touch screen.
+    while (fingersY() - scrollY >= cellH) { scrollY += cellH; send([2, 5, 0, c, r, 0]); }
+    while (scrollY - fingersY() >= cellH) { scrollY -= cellH; send([2, 4, 0, c, r, 0]); }
+  }
+});
+
+function touchEnd(e) {
+  if (e.pointerType === "mouse" || !touches.has(e.pointerId)) return;
+  touches.delete(e.pointerId);
+  if (touchMode === "drag" && ctl) {
+    const [c, r] = cellAt(e);
+    send([2, 1, 0, c, r, 0]);
+  }
+  if (touches.size === 0) touchMode = null;
+  else if (touchMode === "scroll") scrollY = fingersY();
+  else touchMode = null; // one finger lifted mid-drag: wait for all to come up
+}
+canvas.addEventListener("pointerup", touchEnd);
+canvas.addEventListener("pointercancel", touchEnd);
+
+// The keypad. Buttons act on pointerdown, so a press doesn't take the focus (and the
+// phone's keyboard, if it's up, stays up). Direction buttons repeat while held.
+let repeatTimer = null;
+
+function pressKey(key) {
+  if (!ctl) return;
+  if (key in NAMED_KEYS) send([1, NAMED_KEYS[key], 0, 0]);
+  else send([1, 0, key.codePointAt(0), 0]);
+}
+
+function stopRepeat() {
+  clearTimeout(repeatTimer);
+  repeatTimer = null;
+}
+
+touchPanel.addEventListener("pointerdown", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  e.preventDefault();
+  if (b.id === "kbd-button" || b.id === "touch-menu") return; // these act on click
+  if (!menu.hidden) closeMenu();
+  const key = b.dataset.key;
+  if (key === undefined) return;
+  pressKey(key);
+  if (b.hasAttribute("data-repeat")) {
+    stopRepeat();
+    const again = (delay) => { repeatTimer = setTimeout(() => { pressKey(key); again(120); }, delay); };
+    again(450);
+  }
+});
+for (const ev of ["pointerup", "pointercancel", "pointerleave"]) touchPanel.addEventListener(ev, stopRepeat);
+touchPanel.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// ⌨ brings up the phone's keyboard by focusing a hidden text box; what's typed into it
+// goes to the game. Phones often don't say which key was pressed (Android reports
+// "Unidentified"), so the box is watched for what changes in it instead. It always
+// holds a marker, so a backspace has something to delete and shows up as a change.
+const kbd = document.getElementById("kbd");
+const KBD_MARK = "__";
+let kbdLast = KBD_MARK;
+
+function kbdReset() {
+  kbd.value = KBD_MARK;
+  kbdLast = KBD_MARK;
+  try { kbd.setSelectionRange(KBD_MARK.length, KBD_MARK.length); } catch (_) {}
+}
+kbdReset();
+
+kbd.addEventListener("input", (e) => {
+  const now = kbd.value;
+  let same = 0;
+  while (same < now.length && same < kbdLast.length && now[same] === kbdLast[same]) same++;
+  for (let i = same; i < kbdLast.length; i++) pressKey("Backspace");
+  for (const ch of now.slice(same)) pressKey(ch === "\n" ? "Enter" : ch);
+  kbdLast = now;
+  if (!e.isComposing) kbdReset();
+});
+kbd.addEventListener("compositionend", () => setTimeout(kbdReset));
+
+const kbdButton = document.getElementById("kbd-button");
+kbdButton.addEventListener("click", () => {
+  if (document.activeElement === kbd) kbd.blur();
+  else { kbdReset(); kbd.focus({ preventScroll: true }); }
+});
+kbd.addEventListener("focus", () => kbdButton.classList.add("on"));
+kbd.addEventListener("blur", () => kbdButton.classList.remove("on"));
+
 // ---- the menu: version, seed, saved games, problem reports ---------------------
 
 const REPORT_URL = "https://github.com/tymrek/rusted-empire/issues/new";
@@ -287,10 +458,11 @@ function openMenu() {
 function closeMenu() {
   menu.hidden = true;
   menuButton.setAttribute("aria-expanded", "false");
-  canvas.focus();
+  if (!touchUi) canvas.focus();
 }
 
 menuButton.addEventListener("click", () => (menu.hidden ? openMenu() : closeMenu()));
+document.getElementById("touch-menu").addEventListener("click", () => (menu.hidden ? openMenu() : closeMenu()));
 canvas.addEventListener("mousedown", () => { if (!menu.hidden) closeMenu(); });
 
 function showInfo(version, build, seed) {
@@ -392,6 +564,7 @@ async function start() {
   ctl = new Int32Array(new SharedArrayBuffer((RING + CAPACITY * SLOT) * 4));
   fit();
   window.addEventListener("resize", fit);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", fit);
   const params = new URLSearchParams(location.search);
   const worker = new Worker("worker.js", { type: "module" });
   worker.onmessage = (e) => {
@@ -408,6 +581,8 @@ async function start() {
   const imported = sessionStorage.getItem("rs-empire-imported");
   sessionStorage.removeItem("rs-empire-imported");
   if (imported) say(`"${imported}" is now the saved game in this browser. Start a game, then press L to load it.`, false, false, 20);
+  else if (touchUi && window.innerHeight > window.innerWidth)
+    say("Turn your phone sideways for a bigger screen. Tap ⌨ for the keyboard; drag to look around the map.", false, true, 10);
   else say("rusted-empire: VMS-Empire in your browser. Free software under the GNU GPL v2.", false, true, 8);
 }
 

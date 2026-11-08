@@ -13,6 +13,8 @@ the screen back through the page's rsEmpireScreenText() hook. It checks that:
   - the menu shows the version and seed, downloads the current game, loads a
     downloaded game back in, and pre-fills a problem report;
   - quitting asks to confirm and ends the game with a notice;
+  - on an emulated phone: the whole layout fits beside the keypad, and the game can be
+    started and played with the keypad and the phone's keyboard;
   - nothing is logged as an error along the way.
 
 Usage:
@@ -220,6 +222,46 @@ def main():
         time.sleep(0.5)
         notice = page.evaluate("document.getElementById('notice').hidden ? '' : document.getElementById('notice').textContent")
         check("Game over" in notice, "the game ends with a notice: " + repr(notice))
+
+        print("on a phone")
+        for device in ["Pixel 7 landscape", "iPhone 13"]:
+            phone = browser.new_context(**p.devices[device])
+            pp = phone.new_page()
+            pp.on("pageerror", lambda e: errors.append(str(e)))
+            pp.goto(url + "?seed=" + SEED)
+            check(wait_for(pp, "difficulty level"), f"{device}: the game starts", pp)
+            check(pp.is_visible("#touch"), f"{device}: the keypad is shown")
+            width = max(len(l) for l in screen(pp).splitlines())
+            canvas = pp.locator("#screen").bounding_box()
+            panel = pp.locator("#touch").bounding_box()
+            beside = canvas["x"] + canvas["width"] <= panel["x"] + 0.5 or canvas["y"] + canvas["height"] <= panel["y"] + 0.5
+            check(beside, f"{device}: the screen doesn't run under the keypad")
+
+            def type_on_phone(text):
+                # What a phone keyboard does: changes the text box, without saying which key.
+                pp.evaluate("""(t) => { const k = document.getElementById('kbd');
+                    k.value += t; k.dispatchEvent(new InputEvent('input', {inputType: 'insertText', data: t})); }""", text)
+
+            pp.tap("#kbd-button")
+            check(pp.evaluate("document.activeElement.id") == "kbd", f"{device}: the keyboard button brings up the keyboard")
+            type_on_phone("0")
+            pp.tap("#touch button[data-key='Enter']")
+            check(wait_for(pp, "Autosave"), f"{device}: typed on the phone keyboard, Enter on the keypad", pp)
+            type_on_phone("0")
+            pp.tap("#touch button[data-key='Enter']")
+            check(wait_for(pp, "Build?"), f"{device}: asks what the first city builds", pp)
+            type_on_phone("a")
+            check(wait_for(pp, "[N]ext"), f"{device}: reaches the turn prompt", pp)
+            # the whole layout fits: the panel's turn line and the order list are on screen
+            check("Turn:" in screen(pp), f"{device}: the side panel fits ({width} columns)", pp)
+            turn = re.search(r"Turn: (\d+)", screen(pp)).group(1)
+            pp.tap("#touch button[data-key='n']")
+            end = time.time() + 10
+            while time.time() < end and (re.search(r"Turn: (\d+)", screen(pp)) or [0, turn])[1] == turn and "[Army at" not in screen(pp):
+                time.sleep(0.1)
+            check("[Army at" in screen(pp) or re.search(r"Turn: (\d+)", screen(pp)).group(1) != turn,
+                  f"{device}: the keypad's N ends the turn", pp)
+            phone.close()
 
         check(not errors, "no errors in the browser console" + ("" if not errors else ": " + "; ".join(errors[:3])))
         browser.close()

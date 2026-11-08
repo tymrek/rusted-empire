@@ -2,6 +2,17 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## 0.9.6-beta (not yet released)
+
+### Added
+- **The browser version works on phones and tablets.** The screen shrinks its
+  lettering so the whole game fits (instead of running off the edge), and a keypad
+  appears beside it: directions, the common commands, Esc, Backspace, Enter, the menu,
+  and a button for the phone's own keyboard. One finger drags the map, two scroll the
+  messages. The opening notice no longer sits on the game's questions: it goes away at
+  the first key or tap. Small desktop windows get smaller lettering too, rather than
+  losing the side panel.
+
 ## 0.9.5-beta (not yet released)
 
 ### Fixed
