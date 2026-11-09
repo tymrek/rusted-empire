@@ -4,6 +4,9 @@
 //! and the game never reads it: `Game` holds only the state of the world, `View` only
 //! how it is being looked at. (Keeping the two apart is what will let the game run as a
 //! server, with each client keeping its own view.)
+use std::cell::Cell;
+
+use crate::disp::view_axes;
 use crate::game::Game;
 use crate::models::{Loc, Owner};
 
@@ -35,6 +38,10 @@ pub struct View {
     pub messages_seen: u64,
     /// Show the computer's map instead of the player's (offered once it has resigned).
     pub show_comp_view: bool,
+    /// Where the map was centred when last drawn. The map stays there while what it has to
+    /// show is comfortably on screen, so it doesn't jump about (see `View::map_center`).
+    /// Set while drawing, which only borrows the view, hence the `Cell`.
+    pub anchor: Cell<Option<Loc>>,
 }
 
 impl Default for View {
@@ -47,12 +54,36 @@ impl Default for View {
             msg_scroll: 0,
             messages_seen: 0,
             show_comp_view: false,
+            anchor: Cell::new(None),
         }
     }
 }
 
 impl View {
     /// True if the map should show the cursor (edit mode or picking a destination).
+    /// Where to centre a map viewport of `height` x `width` squares, and remembers it.
+    ///
+    /// A dragged map stays where it was dragged. Otherwise the map has to show its subject
+    /// (the cursor, or `focus`: the unit or city waiting for orders), but it only moves
+    /// when the subject isn't comfortably on screen: off it, or within a few squares of
+    /// its edge. Then it centres on the subject. With no subject at all (a question that
+    /// isn't about a square), the map stays where it was.
+    pub fn map_center(&self, game: &Game, focus: Option<Loc>, height: usize, width: usize) -> Loc {
+        let subject = if self.shows_cursor() { Some(self.cursor) } else { focus };
+        let center = match (self.center, subject, self.anchor.get()) {
+            (Some(dragged), _, _) => dragged,
+            (None, Some(s), Some(a)) if comfortably_shows(game, a, s, height, width) => a,
+            (None, Some(s), _) => s,
+            (None, None, Some(a)) => a,
+            (None, None, None) => game.cities.iter()
+                .find(|c| c.owner == Owner::Player)
+                .map(|c| c.loc)
+                .unwrap_or(Loc { r: game.rows / 2, c: game.cols / 2 }),
+        };
+        self.anchor.set(Some(center));
+        center
+    }
+
     pub fn shows_cursor(&self) -> bool {
         matches!(self.mode, GameMode::Edit | GameMode::PickDest(_))
     }
@@ -72,4 +103,21 @@ impl View {
 pub fn home(game: &Game) -> Loc {
     game.cities.iter().find(|c| c.owner == Owner::Player).map(|c| c.loc)
         .unwrap_or(Loc { r: game.rows / 2, c: game.cols / 2 })
+}
+
+/// Whether a map centred on `center` shows `loc` away from its edges: at least a few
+/// squares in (a fifth of the way, up to 4), unless the map can't scroll any closer to
+/// `loc` because it's already against the map's edge.
+fn comfortably_shows(game: &Game, center: Loc, loc: Loc, height: usize, width: usize) -> bool {
+    let (rows, cols) = view_axes(game, center, height, width);
+    let (loc_rows, loc_cols) = view_axes(game, loc, height, width);
+    let fits = |shown: &[usize], ideal: &[usize], v: usize| match shown.iter().position(|&x| x == v) {
+        None => false,
+        Some(_) if shown == ideal => true,
+        Some(i) => {
+            let margin = (shown.len() / 5).min(4);
+            i >= margin && i + margin < shown.len()
+        }
+    };
+    fits(&rows, &loc_rows, loc.r) && fits(&cols, &loc_cols, loc.c)
 }
