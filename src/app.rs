@@ -197,7 +197,8 @@ impl Session {
             MouseEventKind::Down(MouseButton::Left) => v.drag_from = Some((mouse.column, mouse.row)),
             MouseEventKind::Up(MouseButton::Left) => v.drag_from = None,
             MouseEventKind::Drag(MouseButton::Left) => {
-                let current = v.center.unwrap_or(fallback_center);
+                // From what's on screen now: where it was dragged to, or where it was drawn.
+                let current = v.center.or(v.anchor.get()).unwrap_or(fallback_center);
                 if let Some((last_c, last_r)) = v.drag_from {
                     let dc = mouse.column as i32 - last_c as i32;
                     let dr = mouse.row as i32 - last_r as i32;

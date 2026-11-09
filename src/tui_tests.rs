@@ -320,6 +320,80 @@ fn screen_renders_at_any_size_in_every_mode() {
     }
 }
 
+/// The map square drawn at screen square (x, y), given where the map was centred.
+fn square_at(g: &Game, view: &View, width: u16, height: u16, loc: Loc) -> Option<(u16, u16)> {
+    map_square(g, view.anchor.get().expect("the map has been drawn"), width, height, loc)
+}
+
+/// A square of the player's that's well away from its first city (so the old fallback
+/// of centring on that city would show a different part of the map).
+fn far_from_home(g: &Game) -> Loc {
+    let home = g.cities[player_city(g)].loc;
+    Loc { r: (home.r + g.rows / 2) % g.rows, c: (home.c + g.cols / 2) % g.cols }
+}
+
+#[test]
+fn map_stays_put_for_a_question_that_isnt_about_a_square() {
+    // Asking for orders for a unit far from home, then a yes/no question (no square to
+    // show): the map must not jump back to the home city.
+    let g = world(SEED);
+    let unit = far_from_home(&g);
+    let mut view = View::default();
+    render(&g, &mut view, 120, 40, "Orders for Army: ", Some((unit, true)));
+    let before = view.anchor.get();
+    render(&g, &mut view, 120, 40, "Really quit game? [Y/N]: ", None);
+    assert_eq!(view.anchor.get(), before, "the map didn't move");
+    assert!(square_at(&g, &view, 120, 40, unit).is_some(), "the unit is still on screen");
+}
+
+#[test]
+fn map_doesnt_move_while_its_subject_stays_well_on_screen() {
+    // A small screen, so most of the map is off it.
+    let (w, h) = (80, 24);
+    let g = world(SEED);
+    let first = Loc { r: g.rows / 2, c: g.cols / 2 };
+    let mut view = View::default();
+    render(&g, &mut view, w, h, "", Some((first, true)));
+    assert_eq!(view.anchor.get(), Some(first), "the first unit is centred");
+    // the next unit a couple of squares away: same view
+    let next = g.offset(first, 2, 3).unwrap();
+    render(&g, &mut view, w, h, "", Some((next, true)));
+    assert_eq!(view.anchor.get(), Some(first));
+    // a unit off the screen: the map goes to it, centred
+    let away = g.offset(first, 0, 30).unwrap();
+    assert!(square_at(&g, &view, w, h, away).is_none(), "test setup: off screen");
+    render(&g, &mut view, w, h, "", Some((away, true)));
+    assert_eq!(view.anchor.get(), Some(away));
+}
+
+#[test]
+fn map_scrolls_when_the_cursor_nears_the_edge() {
+    let (w, h) = (80, 24);
+    let map_w = (w - 30 - 2) as usize;
+    let g = world(SEED);
+    let start = Loc { r: g.rows / 2, c: g.cols / 2 };
+    let mut view = View { mode: GameMode::Edit, cursor: start, ..View::default() };
+    render(&g, &mut view, w, h, "", None);
+    // a few steps: the map stays still under the cursor
+    view.cursor = g.offset(start, 0, 3).unwrap();
+    render(&g, &mut view, w, h, "", None);
+    assert_eq!(view.anchor.get(), Some(start));
+    // keep going right until the map moves: it does so before the cursor reaches the edge
+    let mut moved = false;
+    for _ in 0..map_w {
+        view.cursor = g.offset(view.cursor, 0, 1).unwrap();
+        render(&g, &mut view, w, h, "", None);
+        if view.anchor.get() != Some(start) {
+            moved = true;
+            break;
+        }
+        let (x, _) = square_at(&g, &view, w, h, view.cursor).expect("cursor on screen");
+        assert!((x as usize) < map_w - 1, "the cursor got to the edge without the map scrolling");
+    }
+    assert!(moved, "the map scrolled to follow the cursor");
+    assert_eq!(view.anchor.get(), Some(view.cursor), "and centred on it");
+}
+
 #[test]
 fn screen_title_and_status_match_the_game() {
     let mut g = world(SEED);
