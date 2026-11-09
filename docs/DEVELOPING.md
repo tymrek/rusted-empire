@@ -2,7 +2,7 @@
 
 This guide is for anyone changing the code: how it is organised, how a turn runs,
 where the original VMS-Empire C code went, how saves are versioned, and how to test.
-It describes 2.0.0-alpha.3, the start of the 2.0 line (see [Release lines](#release-lines)).
+It describes 2.0.0-alpha.4, the start of the 2.0 line (see [Release lines](#release-lines)).
 
 ## Release lines
 
@@ -65,7 +65,7 @@ which 1.75 can't read, so check the lock file's diff before committing.
 | `headless.rs` | ~310 | The AI-vs-AI test rig (`--headless`). |
 | `app.rs` | ~900 | The interactive front end: startup questions, the main input loop, prompts, edit mode. |
 | `disp.rs` | ~360 | Draws the screen with ratatui. |
-| `view.rs` | ~75 | `View`: what the screen is showing (mode, cursor, scroll, map centre). Never saved. |
+| `view.rs` | ~120 | `View`: what the screen is showing (mode, cursor, scroll, map centre, and where the map stays put: `map_center`). Never saved. |
 | `keys.rs` | ~120 | The keyboard vocabulary: unit keys, direction keys, order keys and menus. |
 | `ui.rs` | ~100 | The `Ui` trait (all of the front end's input and output) and `TermUi`, the real terminal. |
 | `terminal.rs` | ~40 | `TerminalGuard`: raw mode and the alternate screen, restored on every exit path, including panics. |

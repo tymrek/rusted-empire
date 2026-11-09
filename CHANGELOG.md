@@ -2,6 +2,11 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## 2.0.0-alpha.4 (unreleased)
+
+Brings in the 1.x line on `main` up to 0.9.7-beta (listed under those versions
+below): the map keeps still while you give orders, rather than jumping about.
+
 ## 2.0.0-alpha.3 (unreleased)
 
 Brings in the fixes from the 1.x line on `main` up to 0.9.5-beta (listed under those
@@ -19,7 +24,24 @@ The start of the 2.0 line, on the `2.0` branch: the version of rusted-empire tha
 departs from the original, beginning with a client/server split. The original-faithful
 line continues on `main` as 1.0.x. So far the game is the same as 0.9.1-beta.
 
-## 0.9.5-beta (not yet released)
+## 0.9.7-beta (not yet released)
+
+### Changed
+- **The map keeps still.** It used to centre on every unit, move under the cursor at
+  every step, and jump back to your first city whenever a question had no square to
+  show (a yes/no question, picking orders, choosing a march direction), so you lost
+  sight of the unit you were giving orders to. Now it stays where it is while the unit
+  or cursor is comfortably on screen, and only moves (centring on it) when it's off the
+  screen or a few squares from the edge. Questions that aren't about a square leave the
+  map alone.
+
+## 0.9.6-beta (2026-11-08)
+
+The first release since 0.9.1-beta: it brings together 0.9.2-beta to 0.9.5-beta,
+listed below, which weren't released on their own. (The browser version's phone and
+tablet support, also 0.9.6-beta, is on the `wasm` branch.)
+
+## 0.9.5-beta (not released on its own; in 0.9.6-beta)
 
 ### Fixed
 - **Armies slept through a hostile city.** A loaded transport that came up beside a
@@ -27,7 +49,7 @@ line continues on `main` as 1.0.x. So far the game is the same as 0.9.1-beta.
   standing order there. Now its armies come up on deck for orders whenever it comes
   beside such a city, and a standing order it was sailing on stops there.
 
-## 0.9.4-beta (not yet released)
+## 0.9.4-beta (not released on its own; in 0.9.6-beta)
 
 ### Fixed
 - **A unit that sank a transport didn't move into its square.** Armies left on the
@@ -35,7 +57,7 @@ line continues on `main` as 1.0.x. So far the game is the same as 0.9.1-beta.
   say) stayed where it was, even though those armies then drowned. Armies stranded in
   open sea no longer hold a square.
 
-## 0.9.3-beta (not yet released)
+## 0.9.3-beta (not released on its own; in 0.9.6-beta)
 
 ### Fixed
 - **The fighter fuel warning kept asking.** After you said yes to flying a fighter
@@ -43,7 +65,7 @@ line continues on `main` as 1.0.x. So far the game is the same as 0.9.1-beta.
   clearance lasts until the fighter lands (and refuels) or is lost, and is kept in
   saves.
 
-## 0.9.2-beta (not yet released)
+## 0.9.2-beta (not released on its own; in 0.9.6-beta)
 
 ### Added
 - `--version` (or `-V`) prints the version.
