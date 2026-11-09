@@ -1,6 +1,6 @@
 # rusted-empire player manual
 
-This manual covers how to play rusted-empire 2.0.0-alpha.3 (so far, the same game as 1.0). The rules are those of
+This manual covers how to play rusted-empire 2.0.0-alpha.4 (so far, the same game as 1.0). The rules are those of
 VMS-Empire; where this port differs, the text says so. The README lists all the
 differences in one place.
 
@@ -46,8 +46,10 @@ A new game asks three questions:
 [prompt line: what the game is asking, and the keys that apply]
 ```
 
-- **Map.** It follows the unit or city being asked about. Drag with the left mouse
-  button to look elsewhere.
+- **Map.** It shows the unit or city being asked about, and keeps still while it can:
+  it only moves when that unit (or the cursor) is off the screen or nearly at its edge,
+  and then centres on it. Questions that aren't about a square leave it where it is.
+  Drag with the left mouse button to look elsewhere.
 - **Info panel.** Your score, armies and cities, the enemy cities you know of, and
   the hits and moves of the active unit.
 - **Messages.** Combat results, production, sentries waking, and so on. Scroll back

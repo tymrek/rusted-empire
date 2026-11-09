@@ -93,21 +93,9 @@ pub fn render(f: &mut Frame, game: &Game, view: &View, prompt: &str, active_blin
         let map_area = upper_chunks[0];
         let sidebar_area = upper_chunks[1];
 
-        let center_loc = if let Some(vp) = view.center {
-            vp
-        } else if view.shows_cursor() {
-            view.cursor
-        } else if let Some((loc, _)) = active_blink {
-            loc
-        } else {
-            game.cities.iter()
-                .find(|c| c.owner == Owner::Player)
-                .map(|c| c.loc)
-                .unwrap_or(Loc { r: game.rows / 2, c: game.cols / 2 })
-        };
-
         let view_height = map_area.height.saturating_sub(2) as usize;
         let view_width = map_area.width.saturating_sub(2) as usize;
+        let center_loc = view.map_center(game, active_blink.map(|(loc, _)| loc), view_height, view_width);
 
 
         let (row_coords, col_coords) = view_axes(game, center_loc, view_height, view_width);
