@@ -2,6 +2,17 @@
 
 All notable changes to rusted-empire. Versions follow the repository's tags.
 
+## 0.9.7-beta (not yet released)
+
+### Changed
+- **The map keeps still.** It used to centre on every unit, move under the cursor at
+  every step, and jump back to your first city whenever a question had no square to
+  show (a yes/no question, picking orders, choosing a march direction), so you lost
+  sight of the unit you were giving orders to. Now it stays where it is while the unit
+  or cursor is comfortably on screen, and only moves (centring on it) when it's off the
+  screen or a few squares from the edge. Questions that aren't about a square leave the
+  map alone.
+
 ## 0.9.6-beta (2026-11-08)
 
 The first release since 0.9.1-beta: it brings together 0.9.2-beta to 0.9.5-beta,
